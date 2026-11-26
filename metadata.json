@@ -1,0 +1,6 @@
+{
+  "name": "Name Drop",
+  "description": "Bluetooth Low Energy contact card and photo sharing app with permissions-first readiness gate, audio-synced perimeter sweep, and Gemini daily updates.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

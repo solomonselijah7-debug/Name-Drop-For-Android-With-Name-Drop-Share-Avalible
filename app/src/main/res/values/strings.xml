@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">Name Drop</string>
+    <string name="notification_channel_service">Name Drop Proximity Service</string>
+    <string name="notification_channel_alerts">Name Drop Incoming Alerts</string>
+    <string name="service_notification_title">Name Drop is Ready</string>
+    <string name="service_notification_body_foreground">Listening nearby while Name Drop is open</string>
+    <string name="service_notification_body_background">Low-power Bluetooth proximity scanning active</string>
+    <string name="permissions_gate_title">Enable Essentials First</string>
+    <string name="permissions_gate_subtitle">Name Drop uses Bluetooth Low Energy and Location to detect nearby phones when held together. Enable these permissions before setting up your Contact Card.</string>
+    <string name="permissions_continue_button">Continue to Contact Setup</string>
+    <string name="android_8_unsupported_title">Android 9 or Newer Required</string>
+    <string name="android_8_unsupported_message">Name Drop requires Android 9 (API 28) or newer for reliable low-power Bluetooth Low Energy background scanning and contact transfers. Android 8 (Oreo) is not supported.</string>
+    <string name="namedrop_share_label">NameDrop Share</string>
+</resources>
