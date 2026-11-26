@@ -53,13 +53,13 @@ private data class SparkleParticle(
 )
 
 /**
- * Audio-clock-locked slow-motion Name Drop entry animation (~3.15s total),
+ * Audio-clock-locked slow-motion Name Drop entry animation (~4.25s total),
  * anchored dynamically to the device's detected front camera cutout / bar:
  *
  * 1. Star Drops Down (0.00 - 0.14): Blue 4-point Gemini star drops from the camera cutout.
- * 2. Star Bursts (0.14 - 0.28): Star sparkles, shakes, and bursts outward into blue sparkles.
+ * 2. Star Bursts (0.14 - 0.28): Star sparkles, shakes, and bursts with the Apple Pay chime.
  * 3. Star Goes Up (0.28 - 0.42): Star reforms back to life and glides up into the camera cutout.
- * 4. Original Full-Screen Blue Flash (0.40 - 0.56): Soft system-blue wash illuminates and fades cleanly.
+ * 4. Original Full-Screen Blue Flash (0.40 - 0.56): Soft system-blue wash illuminates with the Gemini sound.
  * 5. Original Thick Perimeter Sweep (0.54 - 0.92): Thick 7.5dp trail splits from camera bar down both sides.
  * 6. Bottom Convergence & Card Pop-Up (0.92 - 1.00): Trails meet at bottom center and invoke [onSweepComplete].
  */
@@ -112,11 +112,11 @@ fun PerimeterSweepOverlay(
                 maxSeenMs = audioMs
                 normalizedTime = (audioMs / totalDurationMs).coerceIn(0f, 1f)
 
-                if (!burstHapticFired && audioMs >= 650L) {
+                if (!burstHapticFired && audioMs >= 820L) {
                     burstHapticFired = true
                     haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                 }
-                if (!flashHapticFired && audioMs >= 1320L) {
+                if (!flashHapticFired && audioMs >= 1850L) {
                     flashHapticFired = true
                     haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                 }

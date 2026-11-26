@@ -25,7 +25,7 @@ import kotlin.math.sin
 class ShareSoundPlayer(private val context: Context) {
 
     companion object {
-        const val CHIME_DURATION_MS = 3150L
+        const val CHIME_DURATION_MS = 4250L
     }
 
     private val appContext = context.applicationContext
@@ -188,28 +188,23 @@ class ShareSoundPlayer(private val context: Context) {
         thread(isDaemon = true, name = "chime-fallback") {
             runCatching {
                 val sampleRate = 44100
-                val totalSamples = (sampleRate * 3.15f).toInt()
+                val totalSamples = (sampleRate * 4.25f).toInt()
                 val pcm = ShortArray(totalSamples)
 
                 for (i in 0 until totalSamples) {
                     val t = i / sampleRate.toDouble()
                     var s = 0.0
-                    // Opening shimmer (0.0s - 0.8s)
-                    if (t < 0.85) {
-                        val env = sin(PI * (t / 0.85)).coerceAtLeast(0.0) * 0.25
-                        s += sin(2.0 * PI * 523.25 * t) * env
+                    // Apple Pay style burst ping around 0.78s
+                    if (t >= 0.78 && t < 1.55) {
+                        val dt = t - 0.78
+                        val env = exp(-dt * 4.5) * (1.0 - exp(-dt * 40.0)) * 0.45
+                        s += (sin(2.0 * PI * 1046.50 * t) + 0.55 * sin(2.0 * PI * 1567.98 * t)) * env
                     }
-                    // Main harmonic swell (0.85s peak -> 1.50s crest)
-                    if (t >= 0.80) {
-                        val dt = t - 0.80
-                        val env = exp(-dt * 2.2) * (1.0 - exp(-dt * 18.0)) * 0.45
+                    // Gemini swell across star rise, flash, and sweep (1.35s - 4.15s)
+                    if (t >= 1.35) {
+                        val dt = t - 1.35
+                        val env = exp(-dt * 1.45) * (1.0 - exp(-dt * 14.0)) * 0.45
                         s += (sin(2.0 * PI * 659.25 * t) + 0.6 * sin(2.0 * PI * 987.77 * t)) * env
-                    }
-                    // Third crisp chime ping (1.85s)
-                    if (t >= 1.85) {
-                        val dt = t - 1.85
-                        val env = exp(-dt * 2.6) * (1.0 - exp(-dt * 28.0)) * 0.50
-                        s += (sin(2.0 * PI * 1046.50 * t) + 0.5 * sin(2.0 * PI * 1567.98 * t)) * env
                     }
                     pcm[i] = (s.coerceIn(-0.95, 0.95) * Short.MAX_VALUE).toInt().toShort()
                 }
