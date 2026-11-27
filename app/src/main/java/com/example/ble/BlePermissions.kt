@@ -39,6 +39,25 @@ object BlePermissions {
         return requiredBluetoothPermissions() + requiredLocationPermissions()
     }
 
+    fun requiredContactsPermissions(): Array<String> {
+        return arrayOf(
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.WRITE_CONTACTS
+        )
+    }
+
+    fun hasContactsPermission(context: Context): Boolean {
+        val readGranted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_CONTACTS
+        ) == PackageManager.PERMISSION_GRANTED
+        val writeGranted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.WRITE_CONTACTS
+        ) == PackageManager.PERMISSION_GRANTED
+        return readGranted && writeGranted
+    }
+
     fun hasNotificationPermission(context: Context): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ContextCompat.checkSelfPermission(
@@ -161,6 +180,7 @@ object BlePermissions {
             hasNotificationPermission = hasNotificationPermission(context),
             isIgnoringBatteryOptimizations = isIgnoringBatteryOptimizations(context),
             canDrawOverlays = canDrawOverlays(context),
+            hasContactsPermissions = hasContactsPermission(context),
             isHuaweiDevice = isHuawei,
             deviceModelLabel = "$manufacturer $model".trim()
         )

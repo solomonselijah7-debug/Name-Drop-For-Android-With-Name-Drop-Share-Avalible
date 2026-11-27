@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -22,11 +24,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BluetoothDisabled
+import androidx.compose.material.icons.rounded.Call
+import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Sensors
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -34,13 +41,19 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
 import com.example.model.BleProximityState
 import com.example.model.ContactCard
 import com.example.model.GlowThemeStyle
 import com.example.model.PermissionReadinessState
+import com.example.model.SavedContactEntry
 import com.example.ui.components.ContactPosterCard
 import com.example.ui.components.DynamicIslandStatusPill
 import com.example.ui.components.IosActionRow
@@ -51,12 +64,14 @@ import com.example.ui.components.IosIconBadge
 import com.example.ui.components.LiveRssiSignalMeter
 import com.example.ui.components.PhoneTapIllustration
 import com.example.ui.theme.LocalIosColors
+import java.io.File
 
 @Composable
 fun NameDropHomeScreen(
     readiness: PermissionReadinessState,
     bleState: BleProximityState,
     myCard: ContactCard,
+    savedContacts: List<SavedContactEntry>,
     activeGlowTheme: GlowThemeStyle,
     contentPadding: PaddingValues,
     onToggleNameDrop: (Boolean) -> Unit,
@@ -64,9 +79,12 @@ fun NameDropHomeScreen(
     onRestartBluetoothScan: () -> Unit,
     onOpenBluetoothSettings: () -> Unit,
     onCustomizeCard: () -> Unit,
-    onQuickTestSweep: () -> Unit
+    onQuickTestSweep: () -> Unit,
+    onSyncSavedContact: (String) -> Unit,
+    onRequestContactsPermission: () -> Unit
 ) {
     val ios = LocalIosColors.current
+    val context = LocalContext.current
 
     Box(
         modifier = Modifier
@@ -289,6 +307,139 @@ fun NameDropHomeScreen(
                 glowTheme = activeGlowTheme,
                 onPortraitClick = onCustomizeCard
             )
+
+            IosGroupedSection(
+                header = "Saved Contacts (${savedContacts.size})",
+                footer = if (readiness.hasContactsPermissions) {
+                    "Received and swapped cards auto-save to your phone's Contacts and here with full phone numbers."
+                } else {
+                    "Received and swapped cards auto-save here locally. Grant Contacts permission to sync numbers to your phone's Contacts book."
+                }
+            ) {
+                if (!readiness.hasContactsPermissions) {
+                    IosActionRow(
+                        title = "Auto-Save to Phone Contacts",
+                        subtitle = "Allow Contacts permission so received numbers go straight into your dialer",
+                        icon = Icons.Rounded.Contacts,
+                        badgeColor = ios.green,
+                        trailingText = "Enable",
+                        trailingStatusColor = ios.blue,
+                        testTag = "home_enable_contacts_permission_row",
+                        onClick = onRequestContactsPermission
+                    )
+                    if (savedContacts.isNotEmpty()) {
+                        IosHairlineDivider()
+                    }
+                }
+
+                if (savedContacts.isEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Contacts,
+                            contentDescription = null,
+                            tint = ios.labelSecondary
+                        )
+                        Text(
+                            text = "No received contacts saved yet. Hold phones together to receive or swap a Contact Card.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = ios.labelSecondary
+                        )
+                    }
+                } else {
+                    savedContacts.take(12).forEachIndexed { idx, entry ->
+                        if (idx > 0) IosHairlineDivider()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(entry.card.backgroundColorHex)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (!entry.card.photoPath.isNullOrBlank()) {
+                                    AsyncImage(
+                                        model = File(entry.card.photoPath),
+                                        contentDescription = entry.card.displayName,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Person,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = entry.card.displayName.ifBlank { "Shared Contact" },
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = ios.labelPrimary
+                                )
+                                Text(
+                                    text = buildString {
+                                        append(entry.card.phoneNumber.ifBlank { "No phone number" })
+                                        append(" • ")
+                                        append(entry.sourceLabel)
+                                        append(if (entry.savedToSystemContacts) " • Phone Book" else " • Local")
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (entry.savedToSystemContacts) ios.green else ios.labelSecondary
+                                )
+                            }
+
+                            if (!entry.savedToSystemContacts && readiness.hasContactsPermissions) {
+                                IconButton(
+                                    onClick = { onSyncSavedContact(entry.id) },
+                                    modifier = Modifier.size(48.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Sync,
+                                        contentDescription = "Sync to Phone Contacts",
+                                        tint = ios.blue
+                                    )
+                                }
+                            }
+
+                            if (entry.card.phoneNumber.isNotBlank()) {
+                                IconButton(
+                                    onClick = {
+                                        val dialIntent = Intent(
+                                            Intent.ACTION_DIAL,
+                                            Uri.parse("tel:${Uri.encode(entry.card.phoneNumber)}")
+                                        )
+                                        runCatching { context.startActivity(dialIntent) }
+                                    },
+                                    modifier = Modifier
+                                        .size(48.dp)
+                                        .testTag("saved_contact_call_${idx}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Call,
+                                        contentDescription = "Call ${entry.card.displayName}",
+                                        tint = ios.green
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             Spacer(modifier = Modifier.height(104.dp))
         }

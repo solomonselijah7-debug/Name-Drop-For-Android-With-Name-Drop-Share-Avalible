@@ -76,6 +76,7 @@ fun NameDropShareScreen(
     transferState: PhotoTransferState,
     contentPadding: PaddingValues,
     onToggleShare: (Boolean) -> Unit,
+    onEnableShareQuietly: () -> Unit,
     onStartReceiveListening: () -> Unit,
     onStopReceiveListening: () -> Unit,
     onSelectPhoto: (Uri?) -> Unit,
@@ -89,7 +90,9 @@ fun NameDropShareScreen(
     val mediaPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
-        onSelectPhoto(uri)
+        if (uri != null) {
+            onSelectPhoto(uri)
+        }
     }
 
     val isSelectedVideo = remember(selectedPhotoUri) {
@@ -206,7 +209,7 @@ fun NameDropShareScreen(
 
                     Button(
                         onClick = {
-                            if (!isShareEnabled) onToggleShare(true)
+                            if (!isShareEnabled) onEnableShareQuietly()
                             mediaPicker.launch(
                                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
                             )
@@ -337,8 +340,12 @@ fun NameDropShareScreen(
                                 }
                             }
 
+                            val isShareBusy = transferState.phase == TransferPhase.SWEEPING ||
+                                transferState.phase == TransferPhase.TRANSFERRING
+
                             Button(
                                 onClick = onStartSingleShare,
+                                enabled = !isShareBusy,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .heightIn(min = 52.dp)
@@ -353,7 +360,12 @@ fun NameDropShareScreen(
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
-                                    text = if (isSelectedVideo) "Share Video Nearby" else "Share Photo Nearby",
+                                    text = when {
+                                        transferState.phase == TransferPhase.HOLD_TO_SHARE -> "Hold Phones Together..."
+                                        isShareBusy -> "Sharing..."
+                                        isSelectedVideo -> "Share Video Nearby"
+                                        else -> "Share Photo Nearby"
+                                    },
                                     color = Color.White,
                                     fontWeight = FontWeight.SemiBold
                                 )
@@ -363,6 +375,7 @@ fun NameDropShareScreen(
 
                             Button(
                                 onClick = onStartGroupShare,
+                                enabled = !isShareBusy,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .heightIn(min = 52.dp)
@@ -376,7 +389,15 @@ fun NameDropShareScreen(
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text("Start Step-by-Step Group Share", color = Color.White, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    text = if (isShareBusy && transferState.isGroupShare) {
+                                        "Sharing with Group..."
+                                    } else {
+                                        "Start Step-by-Step Group Share"
+                                    },
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold
+                                )
                             }
                         }
                     }
@@ -412,6 +433,12 @@ fun NameDropShareScreen(
                                 contentDescription = null,
                                 tint = ios.blue,
                                 modifier = Modifier.size(38.dp)
+                            )
+
+                            TransferPhase.SWEEPING -> CircularProgressIndicator(
+                                modifier = Modifier.size(34.dp),
+                                color = ios.blue,
+                                strokeWidth = 3.dp
                             )
 
                             else -> Unit

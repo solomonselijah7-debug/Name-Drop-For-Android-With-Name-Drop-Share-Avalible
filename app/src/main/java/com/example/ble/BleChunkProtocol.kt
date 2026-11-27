@@ -14,6 +14,9 @@ object BleChunkProtocol {
     const val TYPE_VIDEO_SHARE = 4
     const val TYPE_GROUP_VIDEO_SHARE = 5
     const val TYPE_SHARE_HANDSHAKE_READY = 6
+    const val TYPE_TRANSFER_REQUEST = 7
+    const val TYPE_TRANSFER_RESPONSE = 8
+    const val TYPE_TRANSFER_ACK = 9
 
     data class DecodedPayload(
         val type: Int,
@@ -24,8 +27,23 @@ object BleChunkProtocol {
         val isVideo: Boolean = false,
         val photoBytes: ByteArray? = null,
         val backgroundPhotoBytes: ByteArray? = null,
-        val verifiedSha256: Boolean = true
+        val verifiedSha256: Boolean = true,
+        val transferId: String? = null,
+        val byteCount: Long = 0L,
+        val isGroupShare: Boolean = false,
+        val accepted: Boolean = false,
+        val ackSuccess: Boolean = false,
+        val responseReason: String? = null
     )
+
+    fun expectedTotalFrameLength(raw: ByteArray): Int? {
+        if (raw.size < 8) return null
+        val buf = ByteBuffer.wrap(raw, 0, 8)
+        val headerLen = buf.int
+        val binaryLen = buf.int
+        if (headerLen <= 0 || binaryLen < 0) return null
+        return 8 + headerLen + binaryLen
+    }
 
     fun encodeContactPayload(
         card: ContactCard,
@@ -87,7 +105,8 @@ object BleChunkProtocol {
         mediaBytes: ByteArray,
         mimeType: String,
         isVideo: Boolean,
-        isGroupShare: Boolean
+        isGroupShare: Boolean,
+        transferId: String? = null
     ): ByteArray {
         val msgType = when {
             isVideo && isGroupShare -> TYPE_GROUP_VIDEO_SHARE
@@ -97,10 +116,12 @@ object BleChunkProtocol {
         }
         val header = JSONObject().apply {
             put("type", msgType)
+            if (!transferId.isNullOrBlank()) put("transferId", transferId)
             put("senderName", senderName)
             put("fileName", fileName)
             put("mimeType", mimeType)
             put("isVideo", isVideo)
+            put("isGroupShare", isGroupShare)
             put("photoSha256", MediaStorageHelper.computeSha256(mediaBytes))
         }.toString().toByteArray(Charsets.UTF_8)
 
@@ -109,6 +130,75 @@ object BleChunkProtocol {
             .putInt(mediaBytes.size)
             .put(header)
             .put(mediaBytes)
+            .array()
+    }
+
+    fun encodeTransferRequest(
+        transferId: String,
+        senderName: String,
+        fileName: String,
+        mimeType: String,
+        isVideo: Boolean,
+        byteCount: Long,
+        isGroupShare: Boolean
+    ): ByteArray {
+        val header = JSONObject().apply {
+            put("type", TYPE_TRANSFER_REQUEST)
+            put("transferId", transferId)
+            put("senderName", senderName)
+            put("fileName", fileName)
+            put("mimeType", mimeType)
+            put("isVideo", isVideo)
+            put("byteCount", byteCount)
+            put("isGroupShare", isGroupShare)
+        }.toString().toByteArray(Charsets.UTF_8)
+
+        return ByteBuffer.allocate(8 + header.size)
+            .putInt(header.size)
+            .putInt(0)
+            .put(header)
+            .array()
+    }
+
+    fun encodeTransferResponse(
+        transferId: String,
+        accepted: Boolean,
+        responderName: String,
+        reason: String? = null
+    ): ByteArray {
+        val header = JSONObject().apply {
+            put("type", TYPE_TRANSFER_RESPONSE)
+            put("transferId", transferId)
+            put("accepted", accepted)
+            put("senderName", responderName)
+            if (!reason.isNullOrBlank()) put("reason", reason)
+        }.toString().toByteArray(Charsets.UTF_8)
+
+        return ByteBuffer.allocate(8 + header.size)
+            .putInt(header.size)
+            .putInt(0)
+            .put(header)
+            .array()
+    }
+
+    fun encodeTransferAck(
+        transferId: String,
+        success: Boolean,
+        responderName: String,
+        reason: String? = null
+    ): ByteArray {
+        val header = JSONObject().apply {
+            put("type", TYPE_TRANSFER_ACK)
+            put("transferId", transferId)
+            put("ackSuccess", success)
+            put("senderName", responderName)
+            if (!reason.isNullOrBlank()) put("reason", reason)
+        }.toString().toByteArray(Charsets.UTF_8)
+
+        return ByteBuffer.allocate(8 + header.size)
+            .putInt(header.size)
+            .putInt(0)
+            .put(header)
             .array()
     }
 
@@ -160,81 +250,127 @@ object BleChunkProtocol {
             val json = JSONObject(String(headerBytes, Charsets.UTF_8))
             val type = json.getInt("type")
 
-            if (type == TYPE_CONTACT_CARD || type == TYPE_SHARE_HANDSHAKE_READY) {
-                val portraitLen = json.optInt("portraitLen", binaryLen).coerceIn(0, binaryLen)
-                val bgPhotoLen = json.optInt("bgPhotoLen", (binaryLen - portraitLen).coerceAtLeast(0))
-                    .coerceIn(0, (binaryLen - portraitLen).coerceAtLeast(0))
+            when (type) {
+                TYPE_CONTACT_CARD, TYPE_SHARE_HANDSHAKE_READY -> {
+                    val portraitLen = json.optInt("portraitLen", binaryLen).coerceIn(0, binaryLen)
+                    val bgPhotoLen = json.optInt("bgPhotoLen", (binaryLen - portraitLen).coerceAtLeast(0))
+                        .coerceIn(0, (binaryLen - portraitLen).coerceAtLeast(0))
 
-                val portraitBytes = if (binaryBytes != null && portraitLen > 0) {
-                    binaryBytes.copyOfRange(0, portraitLen)
-                } else {
-                    null
-                }
-                val bgBytes = if (binaryBytes != null && bgPhotoLen > 0) {
-                    binaryBytes.copyOfRange(portraitLen, portraitLen + bgPhotoLen)
-                } else {
-                    null
+                    val portraitBytes = if (binaryBytes != null && portraitLen > 0) {
+                        binaryBytes.copyOfRange(0, portraitLen)
+                    } else {
+                        null
+                    }
+                    val bgBytes = if (binaryBytes != null && bgPhotoLen > 0) {
+                        binaryBytes.copyOfRange(portraitLen, portraitLen + bgPhotoLen)
+                    } else {
+                        null
+                    }
+
+                    val expectedSha = json.optString("photoSha256", "")
+                    val verified = if (portraitBytes != null && expectedSha.isNotBlank()) {
+                        MediaStorageHelper.computeSha256(portraitBytes) == expectedSha
+                    } else {
+                        true
+                    }
+
+                    val font = runCatching {
+                        PosterFontStyle.valueOf(json.optString("fontStyle", PosterFontStyle.BOLD.name))
+                    }.getOrDefault(PosterFontStyle.BOLD)
+                    val glow = runCatching {
+                        GlowThemeStyle.valueOf(json.optString("glowAccent", GlowThemeStyle.NONE.name))
+                    }.getOrDefault(GlowThemeStyle.NONE)
+
+                    val card = ContactCard(
+                        displayName = json.optString("displayName", "Nearby Contact"),
+                        phoneNumber = json.optString("phoneNumber", ""),
+                        email = json.optString("email", ""),
+                        company = json.optString("company", ""),
+                        handle = json.optString("handle", ""),
+                        notes = json.optString("notes", ""),
+                        backgroundColorHex = json.optLong("bgColor", 0xFF1E293B),
+                        nameColorHex = json.optLong("nameColor", 0xFFFFFFFF),
+                        fontStyle = font,
+                        photoSha256 = expectedSha.takeIf { it.isNotBlank() },
+                        fullScreenBackgroundEnabled = json.optBoolean("fullScreenBg", true),
+                        glowAccent = glow
+                    )
+                    DecodedPayload(
+                        type = type,
+                        contact = card,
+                        photoBytes = portraitBytes,
+                        backgroundPhotoBytes = bgBytes,
+                        verifiedSha256 = verified
+                    )
                 }
 
-                val expectedSha = json.optString("photoSha256", "")
-                val verified = if (portraitBytes != null && expectedSha.isNotBlank()) {
-                    MediaStorageHelper.computeSha256(portraitBytes) == expectedSha
-                } else {
-                    true
+                TYPE_TRANSFER_REQUEST -> {
+                    val isVideo = json.optBoolean("isVideo", false)
+                    DecodedPayload(
+                        type = type,
+                        transferId = json.optString("transferId", "").takeIf { it.isNotBlank() },
+                        senderName = json.optString("senderName", "Nearby Phone"),
+                        fileName = json.optString(
+                            "fileName",
+                            if (isVideo) "NameDrop_Video.mp4" else "NameDrop_Photo.jpg"
+                        ),
+                        mimeType = json.optString("mimeType", if (isVideo) "video/mp4" else "image/jpeg"),
+                        isVideo = isVideo,
+                        byteCount = json.optLong("byteCount", 0L),
+                        isGroupShare = json.optBoolean("isGroupShare", false)
+                    )
                 }
 
-                val font = runCatching {
-                    PosterFontStyle.valueOf(json.optString("fontStyle", PosterFontStyle.BOLD.name))
-                }.getOrDefault(PosterFontStyle.BOLD)
-                val glow = runCatching {
-                    GlowThemeStyle.valueOf(json.optString("glowAccent", GlowThemeStyle.NONE.name))
-                }.getOrDefault(GlowThemeStyle.NONE)
-
-                val card = ContactCard(
-                    displayName = json.optString("displayName", "Nearby Contact"),
-                    phoneNumber = json.optString("phoneNumber", ""),
-                    email = json.optString("email", ""),
-                    company = json.optString("company", ""),
-                    handle = json.optString("handle", ""),
-                    notes = json.optString("notes", ""),
-                    backgroundColorHex = json.optLong("bgColor", 0xFF1E293B),
-                    nameColorHex = json.optLong("nameColor", 0xFFFFFFFF),
-                    fontStyle = font,
-                    photoSha256 = expectedSha.takeIf { it.isNotBlank() },
-                    fullScreenBackgroundEnabled = json.optBoolean("fullScreenBg", true),
-                    glowAccent = glow
-                )
-                DecodedPayload(
-                    type = type,
-                    contact = card,
-                    photoBytes = portraitBytes,
-                    backgroundPhotoBytes = bgBytes,
-                    verifiedSha256 = verified
-                )
-            } else {
-                val expectedSha = json.optString("photoSha256", "")
-                val verified = if (binaryBytes != null && expectedSha.isNotBlank()) {
-                    MediaStorageHelper.computeSha256(binaryBytes) == expectedSha
-                } else {
-                    true
+                TYPE_TRANSFER_RESPONSE -> {
+                    DecodedPayload(
+                        type = type,
+                        transferId = json.optString("transferId", "").takeIf { it.isNotBlank() },
+                        senderName = json.optString("senderName", "Nearby Phone"),
+                        accepted = json.optBoolean("accepted", false),
+                        responseReason = json.optString("reason", "").takeIf { it.isNotBlank() }
+                    )
                 }
-                val isVideo = json.optBoolean(
-                    "isVideo",
-                    type == TYPE_VIDEO_SHARE || type == TYPE_GROUP_VIDEO_SHARE
-                )
-                val defaultMime = if (isVideo) "video/mp4" else "image/jpeg"
-                DecodedPayload(
-                    type = type,
-                    senderName = json.optString("senderName", "Nearby Phone"),
-                    fileName = json.optString(
-                        "fileName",
-                        if (isVideo) "NameDrop_${System.currentTimeMillis()}.mp4" else "NameDrop_${System.currentTimeMillis()}.jpg"
-                    ),
-                    mimeType = json.optString("mimeType", defaultMime),
-                    isVideo = isVideo,
-                    photoBytes = binaryBytes,
-                    verifiedSha256 = verified
-                )
+
+                TYPE_TRANSFER_ACK -> {
+                    DecodedPayload(
+                        type = type,
+                        transferId = json.optString("transferId", "").takeIf { it.isNotBlank() },
+                        senderName = json.optString("senderName", "Nearby Phone"),
+                        ackSuccess = json.optBoolean("ackSuccess", false),
+                        responseReason = json.optString("reason", "").takeIf { it.isNotBlank() }
+                    )
+                }
+
+                else -> {
+                    val expectedSha = json.optString("photoSha256", "")
+                    val verified = if (binaryBytes != null && expectedSha.isNotBlank()) {
+                        MediaStorageHelper.computeSha256(binaryBytes) == expectedSha
+                    } else {
+                        true
+                    }
+                    val isVideo = json.optBoolean(
+                        "isVideo",
+                        type == TYPE_VIDEO_SHARE || type == TYPE_GROUP_VIDEO_SHARE
+                    )
+                    val defaultMime = if (isVideo) "video/mp4" else "image/jpeg"
+                    DecodedPayload(
+                        type = type,
+                        transferId = json.optString("transferId", "").takeIf { it.isNotBlank() },
+                        senderName = json.optString("senderName", "Nearby Phone"),
+                        fileName = json.optString(
+                            "fileName",
+                            if (isVideo) "NameDrop_${System.currentTimeMillis()}.mp4" else "NameDrop_${System.currentTimeMillis()}.jpg"
+                        ),
+                        mimeType = json.optString("mimeType", defaultMime),
+                        isVideo = isVideo,
+                        isGroupShare = json.optBoolean(
+                            "isGroupShare",
+                            type == TYPE_GROUP_PHOTO_SHARE || type == TYPE_GROUP_VIDEO_SHARE
+                        ),
+                        photoBytes = binaryBytes,
+                        verifiedSha256 = verified
+                    )
+                }
             }
         }.getOrNull()
     }

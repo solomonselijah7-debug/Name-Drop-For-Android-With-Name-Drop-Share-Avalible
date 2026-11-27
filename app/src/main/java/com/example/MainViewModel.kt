@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ai.GeminiDiagnosticWatcher
 import com.example.ai.YearlyUpdateSchedule
 import com.example.audio.ShareSoundPlayer
 import com.example.ble.BlePermissions
@@ -12,17 +13,21 @@ import com.example.ble.BleProximityService
 import com.example.ble.BluetoothLeManager
 import com.example.ble.DeviceDiagnostics
 import com.example.ble.IncomingAlertManager
+import com.example.data.ContactBookRepository
 import com.example.data.CountryLocationVerifier
 import com.example.data.DebugLogger
 import com.example.data.MediaStorageHelper
+import com.example.data.WhatsNewCatalog
 import com.example.model.BleProximityState
 import com.example.model.CardSwapState
 import com.example.model.ContactCard
 import com.example.model.CountryProfile
 import com.example.model.DailyUpdateEntry
+import com.example.model.DiagnosticSnapshot
 import com.example.model.DropBadgePhase
 import com.example.model.DropBadgeState
 import com.example.model.ExternalShareSession
+import com.example.model.GeminiDiagnosisResult
 import com.example.model.GlowPreviewMode
 import com.example.model.GlowThemeStyle
 import com.example.model.IncomingContactOffer
@@ -31,9 +36,13 @@ import com.example.model.NavTab
 import com.example.model.OnboardingStage
 import com.example.model.PermissionReadinessState
 import com.example.model.PhotoTransferState
+import com.example.model.SavedContactEntry
 import com.example.model.SelfTestReport
 import com.example.model.SweepTarget
 import com.example.model.TransferPhase
+import com.example.model.WatcherHealthStatus
+import com.example.model.WatcherTelemetry
+import com.example.ui.overlay.FloatingShareOverlayCoordinator
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -133,6 +142,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _geminiError = MutableStateFlow<String?>(null)
     val geminiError: StateFlow<String?> = _geminiError.asStateFlow()
 
+    val watcherTelemetry: StateFlow<WatcherTelemetry> = GeminiDiagnosticWatcher.telemetry
+    val watcherHealthStatus: StateFlow<WatcherHealthStatus> = GeminiDiagnosticWatcher.healthStatus
+    val diagnosticSnapshot: StateFlow<DiagnosticSnapshot?> = GeminiDiagnosticWatcher.latestSnapshot
+    val savedContacts: StateFlow<List<SavedContactEntry>> = ContactBookRepository.savedContacts
+
+    private val _userGeminiApiKey = MutableStateFlow("")
+    val userGeminiApiKey: StateFlow<String> = _userGeminiApiKey.asStateFlow()
+
+    private val _geminiDiagnosisResult = MutableStateFlow(GeminiDiagnosisResult())
+    val geminiDiagnosisResult: StateFlow<GeminiDiagnosisResult> = _geminiDiagnosisResult.asStateFlow()
+
+    private val _showWhatsNewSheet = MutableStateFlow(false)
+    val showWhatsNewSheet: StateFlow<Boolean> = _showWhatsNewSheet.asStateFlow()
+
+    private val _whatsNewIsNewInstallOrUpdate = MutableStateFlow(false)
+    val whatsNewIsNewInstallOrUpdate: StateFlow<Boolean> = _whatsNewIsNewInstallOrUpdate.asStateFlow()
+
+    val currentInstallVersionLabel: String = WhatsNewCatalog.getVersionDisplayLabel()
+
+    private val _preferencesInitialized = MutableStateFlow(false)
+    private val currentInstallSignature: String by lazy { WhatsNewCatalog.getCurrentInstallSignature(app) }
+    private var hasEvaluatedInstallWhatsNew: Boolean = false
+
     private val _statusToast = MutableStateFlow<String?>(null)
     val statusToast: StateFlow<String?> = _statusToast.asStateFlow()
 
@@ -149,7 +181,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pendingSwapOffer: IncomingContactOffer? = null
 
     init {
+        GeminiDiagnosticWatcher.attachContext(app)
         ble.registerRadioReceiver()
+        viewModelScope.launch {
+            ContactBookRepository.loadSavedContacts(app)
+        }
         observePreferences()
         observeBleEvents()
         refreshReadiness()
@@ -207,13 +243,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                 refreshEffectiveDailyUpdate(country, glowMode)
                 syncBleServiceState()
+                if (!_preferencesInitialized.value) {
+                    _preferencesInitialized.value = true
+                }
             }
         }
 
         viewModelScope.launch {
             prefs.nameDropEnabled.collect { enabled ->
-                ble.setModes(nameDropEnabled = enabled, shareEnabled = _isShareModeEnabled.value)
+                val overlayShareActive = FloatingShareOverlayCoordinator.uiState.value.isActive ||
+                    _externalShareSession.value?.isActive == true
+                ble.setModes(
+                    nameDropEnabled = if (overlayShareActive) true else enabled,
+                    shareEnabled = _isShareModeEnabled.value || overlayShareActive
+                )
                 syncBleServiceState()
+            }
+        }
+
+        viewModelScope.launch {
+            prefs.userGeminiApiKey.collect { key ->
+                _userGeminiApiKey.value = key
+            }
+        }
+
+        viewModelScope.launch {
+            combine(
+                prefs.lastSeenWhatsNewSignature,
+                _preferencesInitialized,
+                _showBluetoothPrompt
+            ) { savedSignature, prefsReady, btPromptVisible ->
+                Triple(savedSignature, prefsReady, btPromptVisible)
+            }.collect { (savedSignature, prefsReady, btPromptVisible) ->
+                if (!prefsReady || btPromptVisible || hasEvaluatedInstallWhatsNew) return@collect
+                hasEvaluatedInstallWhatsNew = true
+                if (WhatsNewCatalog.shouldShowWhatsNew(savedSignature, currentInstallSignature)) {
+                    _whatsNewIsNewInstallOrUpdate.value = true
+                    _showWhatsNewSheet.value = true
+                    prefs.saveLastSeenWhatsNewSignature(currentInstallSignature)
+                }
             }
         }
     }
@@ -229,6 +297,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
                     is BluetoothLeManager.BleEvent.ProximityMatched -> {
                         if (_isTestOnlyMode.value) return@collect
+
+                        // Case 0: Floating gallery share overlay owns this proximity event
+                        if (FloatingShareOverlayCoordinator.uiState.value.isActive) {
+                            return@collect
+                        }
 
                         // Case 1: External Gallery Share prompt is waiting for a nearby phone
                         if (_externalShareSession.value?.isActive == true) {
@@ -279,7 +352,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             backgroundPhotoPath = savedBackdrop?.first,
                             backgroundPhotoSha256 = savedBackdrop?.second ?: event.contact.backgroundPhotoSha256
                         )
-                        val offer = IncomingContactOffer(
+                        val baseOffer = IncomingContactOffer(
                             deviceAddress = event.deviceAddress,
                             deviceName = event.deviceName,
                             contact = hydratedCard,
@@ -288,6 +361,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             backgroundPhotoBytes = event.backgroundPhotoBytes,
                             isReceiveOnlyMode = bleState.value.isReceiveListening
                         )
+
+                        // Auto-save received Contact Card (including phone/call numbers & photo)
+                        val sourceLabel = if (bleState.value.isReceiveListening) "Receive Only" else "Received"
+                        val offer = autoSaveOfferToContacts(baseOffer, sourceLabel)
 
                         // If this phone already tapped Share and was waiting for peer, perform Mutual Swap Arc!
                         if (bleState.value.isAwaitingMutualShare) {
@@ -307,6 +384,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 context = app,
                                 contact = hydratedCard,
                                 rssi = event.rssi,
+                                savedStatusText = offer.autoSaveStatusText ?: "Contact saved",
                                 onAcceptOpenApp = { _incomingContact.value = offer },
                                 onDismiss = { ble.setProximityTriggerLocked(false, resetCooldown = true) }
                             )
@@ -315,6 +393,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         } else if (_incomingContact.value != null) {
                             // Update active displayed card cleanly with real peer data instead of replaying animation
                             _incomingContact.value = offer
+                            _statusToast.value = offer.autoSaveStatusText ?: "Contact saved"
                         } else {
                             pendingContactAfterSweep = offer
                             triggerPerimeterSweep(SweepTarget.CONTACT_CARD_EXCHANGE)
@@ -334,7 +413,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             backgroundPhotoPath = savedBackdrop?.first,
                             backgroundPhotoSha256 = savedBackdrop?.second ?: event.contact.backgroundPhotoSha256
                         )
-                        val offer = IncomingContactOffer(
+                        val baseOffer = IncomingContactOffer(
                             deviceAddress = event.deviceAddress,
                             deviceName = event.deviceName,
                             contact = hydratedCard,
@@ -343,6 +422,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             backgroundPhotoBytes = event.backgroundPhotoBytes,
                             isSwappedExchange = true
                         )
+                        val offer = autoSaveOfferToContacts(baseOffer, "Mutual Swap")
                         if (bleState.value.isAwaitingMutualShare || _incomingContact.value != null) {
                             ble.setModes(
                                 nameDropEnabled = bleState.value.isNameDropEnabled,
@@ -396,19 +476,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
 
                     is BluetoothLeManager.BleEvent.TransferProgress -> {
+                        if (FloatingShareOverlayCoordinator.uiState.value.isActive) return@collect
                         if (activeGattTransferInProgress) {
+                            val clamped = event.progress.coerceIn(0.05f, 0.96f)
                             _photoTransferState.value = _photoTransferState.value.copy(
-                                progress = event.progress.coerceIn(0.05f, 0.96f)
+                                progress = clamped
                             )
                             _dropBadgeState.value = _dropBadgeState.value.copy(
                                 phase = DropBadgePhase.SHARING,
-                                progress = event.progress.coerceIn(0.05f, 0.96f),
+                                progress = clamped,
                                 title = "Sharing"
                             )
+                            _externalShareSession.value?.let { ext ->
+                                _externalShareSession.value = ext.copy(
+                                    isSharing = true,
+                                    progress = clamped,
+                                    statusMessage = "Sharing"
+                                )
+                            }
                         }
                     }
 
                     is BluetoothLeManager.BleEvent.TransferCompleted -> {
+                        if (FloatingShareOverlayCoordinator.uiState.value.isActive) return@collect
                         if (activeGattTransferInProgress) {
                             activeGattTransferInProgress = false
                             completeOutgoingDropBadge(event.peerName, event.success)
@@ -471,6 +561,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             refreshReadiness()
             ble.refreshBondedDevices()
             IncomingAlertManager.dismissOverlay(app)
+        } else if (bleState.value.isNameDropEnabled && !_isTestOnlyMode.value) {
+            if (!_readiness.value.canDrawOverlays || !_readiness.value.hasBackgroundLocation) {
+                GeminiDiagnosticWatcher.captureFailureSnapshot(
+                    context = app,
+                    triggerReason = "App backgrounded with incomplete background/overlay setup",
+                    status = WatcherHealthStatus.ISSUE_DETECTED,
+                    bleState = bleState.value,
+                    transferPhase = _photoTransferState.value.phase,
+                    sweepTarget = _sweepTarget.value,
+                    isTestOnlyMode = _isTestOnlyMode.value
+                )
+            }
         }
         syncBleServiceState()
     }
@@ -538,7 +640,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun toggleShareMode(enabled: Boolean) {
+    fun toggleShareMode(enabled: Boolean, playSweep: Boolean = true) {
         val currentReady = BlePermissions.evaluateReadiness(app)
         _readiness.value = currentReady
         if (enabled && !currentReady.canProceedToContactSetup) {
@@ -550,7 +652,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _isShareModeEnabled.value = true
             ble.setModes(nameDropEnabled = bleState.value.isNameDropEnabled, shareEnabled = true)
             syncBleServiceState()
-            triggerPerimeterSweep(SweepTarget.SHARE_HUB_UNLOCK)
+            if (playSweep) {
+                triggerPerimeterSweep(SweepTarget.SHARE_HUB_UNLOCK)
+            }
         } else {
             _isShareModeEnabled.value = false
             ble.setModes(
@@ -586,7 +690,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             statusText = "Waiting for nearby device..."
         )
         syncBleServiceState()
-        ble.restartScanNow()
+        ble.ensureLowLatencyScan()
     }
 
     fun stopReceiveListening() {
@@ -613,8 +717,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val wantActive = bleState.value.isNameDropEnabled ||
             _isShareModeEnabled.value ||
+            bleState.value.isShareEnabled ||
             bleState.value.isReceiveListening ||
-            _externalShareSession.value?.isActive == true
+            _photoTransferState.value.phase != TransferPhase.IDLE ||
+            _externalShareSession.value?.isActive == true ||
+            FloatingShareOverlayCoordinator.uiState.value.isActive
         val currentReady = BlePermissions.evaluateReadiness(app)
         if (!wantActive || !currentReady.canProceedToContactSetup) {
             BleProximityService.stopService(app)
@@ -754,6 +861,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _statusToast.value = "Select a photo or video first"
             return
         }
+        if (activeGattTransferInProgress || _photoTransferState.value.phase == TransferPhase.TRANSFERRING) {
+            return
+        }
         val currentReady = BlePermissions.evaluateReadiness(app)
         if (!currentReady.canProceedToContactSetup) {
             _statusToast.value = "Enable Bluetooth and Location permissions first."
@@ -761,6 +871,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         pendingShareIsGroup = isGroupShare
+        _isShareModeEnabled.value = true
         ble.clearCooldownForImmediateShare()
         ble.setModes(
             nameDropEnabled = bleState.value.isNameDropEnabled,
@@ -782,7 +893,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isGroupShare = isGroupShare,
                 statusText = "Hold this phone against another phone to share $kindWord"
             )
-            ble.restartScanNow()
+            ble.ensureLowLatencyScan()
         }
     }
 
@@ -839,6 +950,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
             if (sentCount == 0) {
                 activeGattTransferInProgress = false
+                GeminiDiagnosticWatcher.cancelHandshakeWatchdog()
+                GeminiDiagnosticWatcher.captureFailureSnapshot(
+                    context = app,
+                    triggerReason = "Media share stalled: no nearby BLE peer found to send ${payload.fileName}",
+                    status = WatcherHealthStatus.STALL_DETECTED,
+                    bleState = bleState.value,
+                    transferPhase = TransferPhase.HOLD_TO_SHARE,
+                    sweepTarget = _sweepTarget.value,
+                    isTestOnlyMode = _isTestOnlyMode.value
+                )
                 _dropBadgeState.value = DropBadgeState()
                 _photoTransferState.value = PhotoTransferState(
                     phase = TransferPhase.HOLD_TO_SHARE,
@@ -847,6 +968,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     statusText = "Hold this phone against another phone to share ${if (payload.isVideo) "video" else "photo"}"
                 )
             } else {
+                GeminiDiagnosticWatcher.startHandshakeWatchdog(
+                    context = app,
+                    label = payload.fileName,
+                    bleStateProvider = { bleState.value },
+                    transferPhaseProvider = { _photoTransferState.value.phase },
+                    sweepTargetProvider = { _sweepTarget.value },
+                    isTestOnlyProvider = { _isTestOnlyMode.value }
+                )
                 // Fallback progress completion if GATT write callback finishes fast or slow
                 delay(1800L)
                 if (activeGattTransferInProgress) {
@@ -859,7 +988,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun completeOutgoingDropBadge(peerName: String, success: Boolean) {
         viewModelScope.launch {
+            GeminiDiagnosticWatcher.cancelHandshakeWatchdog()
             if (success) {
+                GeminiDiagnosticWatcher.onHandshakeCompleted(true, null)
                 soundPlayer.playCompletionPing()
                 _dropBadgeState.value = DropBadgeState(
                     phase = DropBadgePhase.SHARED,
@@ -871,19 +1002,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     phase = TransferPhase.SAVED,
                     progress = 1f,
                     peerDeviceName = peerName,
-                    statusText = "Sent to $peerName"
+                    statusText = "Shared with $peerName"
                 )
-                delay(1600L)
+                _externalShareSession.value?.let { ext ->
+                    _externalShareSession.value = ext.copy(
+                        isArmed = false,
+                        isSharing = false,
+                        progress = 1f,
+                        isSharedComplete = true,
+                        statusMessage = "Shared with $peerName"
+                    )
+                }
+                delay(2000L)
                 _dropBadgeState.value = DropBadgeState()
-                if (_externalShareSession.value?.isActive == true) {
+                if (_externalShareSession.value?.isSharedComplete == true) {
                     _externalShareSession.value = null
                 }
             } else {
+                GeminiDiagnosticWatcher.captureFailureSnapshot(
+                    context = app,
+                    triggerReason = "BLE transfer interrupted with $peerName",
+                    status = WatcherHealthStatus.ISSUE_DETECTED,
+                    bleState = bleState.value,
+                    transferPhase = TransferPhase.ERROR,
+                    sweepTarget = _sweepTarget.value,
+                    isTestOnlyMode = _isTestOnlyMode.value
+                )
                 _dropBadgeState.value = DropBadgeState()
                 _photoTransferState.value = _photoTransferState.value.copy(
                     phase = TransferPhase.ERROR,
                     statusText = "Transfer interrupted — hold phones closer and try again"
                 )
+                _externalShareSession.value?.let { ext ->
+                    _externalShareSession.value = ext.copy(
+                        isArmed = true,
+                        isSharing = false,
+                        progress = 0f,
+                        statusMessage = "Hold phones closer to retry share"
+                    )
+                }
             }
             updateProximityLock()
         }
@@ -895,20 +1052,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (uris.isEmpty()) return
         val firstMime = mimeTypes.firstOrNull().orEmpty()
         val isVideo = firstMime.startsWith("video/") || MediaStorageHelper.isVideoUri(app, uris.first(), firstMime)
+        val kindWord = if (isVideo) "video" else "photo"
         _externalShareSession.value = ExternalShareSession(
             uris = uris,
             mimeTypes = mimeTypes,
             isVideo = isVideo,
             isMultiple = isMultiple,
-            statusMessage = "Hold this phone against another phone"
+            isArmed = false,
+            isSharing = false,
+            progress = 0f,
+            isSharedComplete = false,
+            statusMessage = "Hold this phone against another phone to share $kindWord"
         )
         _selectedPhotoUri.value = uris.first()
+        _isShareModeEnabled.value = true
         ble.clearCooldownForImmediateShare()
         ble.setModes(nameDropEnabled = true, shareEnabled = true, receiveListening = false)
+        ble.ensureLowLatencyScan()
         syncBleServiceState()
-        ble.restartScanNow()
 
-        // If a phone is already right next to it, start transfer immediately
         val best = ble.getBestPeerSnapshot()
         if (best != null && best.second >= bleState.value.rssiThreshold) {
             executeExternalShareTransfer(best.first)
@@ -917,12 +1079,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun triggerExternalShareNow() {
         val session = _externalShareSession.value ?: return
+        if (session.isSharing || session.isSharedComplete) return
+        val kindWord = if (session.isVideo) "video" else "photo"
+        _externalShareSession.value = session.copy(
+            isArmed = true,
+            statusMessage = "Hold this phone against another phone to share $kindWord"
+        )
         val best = ble.getBestPeerSnapshot()
         if (best == null && !ble.hasDiscoveredTarget()) {
-            _externalShareSession.value = session.copy(
-                statusMessage = "Hold this phone against another phone to connect via Bluetooth..."
-            )
-            ble.restartScanNow()
+            ble.ensureLowLatencyScan()
             return
         }
         executeExternalShareTransfer(best?.first ?: "Nearby Phone")
@@ -930,14 +1095,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun executeExternalShareTransfer(peerName: String) {
         val session = _externalShareSession.value ?: return
-        if (activeGattTransferInProgress) return
+        if (activeGattTransferInProgress || session.isSharedComplete) return
         viewModelScope.launch {
-            _externalShareSession.value = session.copy(
-                statusMessage = "Detected $peerName — Sharing..."
-            )
-            triggerPerimeterSweep(SweepTarget.EXTERNAL_SHARE_DROP)
-            delay(ShareSoundPlayer.CHIME_DURATION_MS + 60L)
-
             val firstUri = session.uris.firstOrNull() ?: return@launch
             val payload = MediaStorageHelper.readMediaPayload(
                 context = app,
@@ -951,6 +1110,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             activeGattTransferInProgress = true
+            _externalShareSession.value = _externalShareSession.value?.copy(
+                isArmed = true,
+                isSharing = true,
+                progress = 0.15f,
+                statusMessage = "Sharing with $peerName..."
+            )
             _dropBadgeState.value = DropBadgeState(
                 phase = DropBadgePhase.SHARING,
                 progress = 0.15f,
@@ -969,11 +1134,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (sentCount == 0) {
                 activeGattTransferInProgress = false
                 _dropBadgeState.value = DropBadgeState()
-                _externalShareSession.value = session.copy(
-                    statusMessage = "Hold this phone against another phone"
+                val kindWord = if (payload.isVideo) "video" else "photo"
+                _externalShareSession.value = _externalShareSession.value?.copy(
+                    isArmed = true,
+                    isSharing = false,
+                    progress = 0f,
+                    statusMessage = "Hold this phone against another phone to share $kindWord"
                 )
+                ble.ensureLowLatencyScan()
             } else {
-                delay(1800L)
+                delay(2400L)
                 if (activeGattTransferInProgress) {
                     activeGattTransferInProgress = false
                     completeOutgoingDropBadge(targetLabel ?: peerName, true)
@@ -1098,7 +1268,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun shareMyContactNow(): Boolean {
         val currentOffer = _incomingContact.value
-        val pushedToNameDropPeer = ble.sendContactToNearestPeer(_myContactCard.value, asMutualHandshake = true)
+        ble.clearCooldownForImmediateShare()
+        val pushedToPeer = ble.sendContactToNearestPeer(_myContactCard.value, asMutualHandshake = true)
 
         if (currentOffer != null && !currentOffer.isTestSimulation && currentOffer.deviceAddress != "NEARBY-BLE") {
             // Peer already shared their card -> trigger iOS Swap Arc immediately!
@@ -1106,17 +1277,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return true
         }
 
-        if (pushedToNameDropPeer) {
-            ble.setModes(
-                nameDropEnabled = bleState.value.isNameDropEnabled,
-                shareEnabled = _isShareModeEnabled.value,
-                awaitingMutualShare = true
-            )
-            _statusToast.value = "Sent your card — waiting for peer to tap Share to swap"
-        } else {
-            _statusToast.value = "Hold this phone against another phone to share Contact Card"
+        // Always keep mutual swap armed cleanly so the Share button stays anchored instead of vanishing
+        ble.setModes(
+            nameDropEnabled = true,
+            shareEnabled = _isShareModeEnabled.value,
+            awaitingMutualShare = true
+        )
+        if (!pushedToPeer) {
+            ble.ensureLowLatencyScan()
         }
-        return pushedToNameDropPeer
+        _statusToast.value = if (pushedToPeer) {
+            "Sent your card — waiting for peer to tap Share to swap"
+        } else {
+            "Ready to share — hold this phone against another phone"
+        }
+        return pushedToPeer
     }
 
     fun receiveOnlyIncomingContact() {
@@ -1126,8 +1301,62 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             receiveListening = true,
             awaitingMutualShare = false
         )
-        _incomingContact.value = _incomingContact.value?.copy(isReceiveOnlyMode = true)
-        _statusToast.value = "Receive Only active — ready to accept without sending yours"
+        val current = _incomingContact.value
+        if (current != null) {
+            viewModelScope.launch {
+                val savedOffer = autoSaveOfferToContacts(
+                    current.copy(isReceiveOnlyMode = true),
+                    sourceLabel = "Receive Only"
+                )
+                _incomingContact.value = savedOffer
+                _statusToast.value = savedOffer.autoSaveStatusText ?: "Contact saved"
+            }
+        } else {
+            _statusToast.value = "Receive Only active — ready to accept without sending yours"
+        }
+    }
+
+    fun saveIncomingContactToBook(onFallbackInsertIntent: (() -> Unit)? = null) {
+        val current = _incomingContact.value ?: return
+        viewModelScope.launch {
+            val source = when {
+                current.isSwappedExchange -> "Mutual Swap"
+                current.isReceiveOnlyMode -> "Receive Only"
+                else -> "Saved"
+            }
+            val updated = autoSaveOfferToContacts(current, source)
+            _incomingContact.value = updated
+            _statusToast.value = updated.autoSaveStatusText ?: "Contact saved"
+            if (!updated.savedToSystemContacts) {
+                onFallbackInsertIntent?.invoke()
+            }
+        }
+    }
+
+    fun syncSavedContactToSystem(entryId: String) {
+        viewModelScope.launch {
+            refreshReadiness()
+            val res = ContactBookRepository.syncExistingLocalContactToSystem(app, entryId)
+            _statusToast.value = res?.statusText ?: "Grant Contacts permission to sync"
+        }
+    }
+
+    private suspend fun autoSaveOfferToContacts(
+        offer: IncomingContactOffer,
+        sourceLabel: String
+    ): IncomingContactOffer {
+        val res = ContactBookRepository.autoSaveContactCard(
+            context = app,
+            card = offer.contact,
+            photoBytes = offer.photoBytes,
+            sourceLabel = sourceLabel
+        ) ?: return offer
+        return offer.copy(
+            contact = res.entry.card,
+            isAutoSavedToContacts = true,
+            savedToSystemContacts = res.savedToSystemContacts,
+            autoSaveStatusText = res.statusText
+        )
     }
 
     fun dismissIncomingContact() {
@@ -1160,9 +1389,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val completedOffer = pendingSwapOffer
         pendingSwapOffer = null
         _cardSwapState.value = CardSwapState()
-        _incomingContact.value = completedOffer
-        _statusToast.value = "Contacts Swapped!"
-        updateProximityLock()
+        if (completedOffer != null) {
+            viewModelScope.launch {
+                val savedOffer = autoSaveOfferToContacts(completedOffer, "Mutual Swap")
+                _incomingContact.value = savedOffer
+                _statusToast.value = "Contacts Swapped • ${savedOffer.autoSaveStatusText ?: "Contact saved"}"
+                updateProximityLock()
+            }
+        } else {
+            _incomingContact.value = null
+            _statusToast.value = "Contacts Swapped!"
+            updateProximityLock()
+        }
     }
 
     // ── 6-Stage Slow-Motion Audio-Locked Sweep Sequence ──────────────────────────
@@ -1208,6 +1446,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 pendingContactAfterSweep = null
                 _incomingContact.value = offer
+                if (offer.isAutoSavedToContacts) {
+                    _statusToast.value = offer.autoSaveStatusText ?: "Contact saved"
+                }
             }
 
             SweepTarget.SHARE_HUB_UNLOCK,
@@ -1417,6 +1658,102 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             previewMode = previewMode,
             zoneId = country.zoneId
         )
+    }
+
+    // ── Gemini Intelligence Watcher & Optional API Key Diagnosis ────────────────
+
+    fun runProximityWatchdogCheck() {
+        refreshReadiness()
+        syncBleServiceState()
+        if (!_isTestOnlyMode.value && bleState.value.isNameDropEnabled) {
+            ble.restartScanNow()
+        }
+        GeminiDiagnosticWatcher.startProximityCheckWatchdog(
+            context = app,
+            triggerLabel = "Manual Test Proximity Now (4s)",
+            bleStateProvider = { bleState.value },
+            transferPhaseProvider = { _photoTransferState.value.phase },
+            sweepTargetProvider = { _sweepTarget.value },
+            isTestOnlyProvider = { _isTestOnlyMode.value },
+            timeoutSeconds = 4
+        )
+        _statusToast.value = "Watching proximity & background service for 4 seconds..."
+    }
+
+    fun captureDiagnosticSnapshotNow() {
+        refreshReadiness()
+        GeminiDiagnosticWatcher.captureFailureSnapshot(
+            context = app,
+            triggerReason = "Manual diagnostic snapshot captured by user",
+            status = if (_readiness.value.isFullyBackgroundCapable && bleState.value.isScanning) {
+                WatcherHealthStatus.HEALTHY
+            } else {
+                WatcherHealthStatus.ISSUE_DETECTED
+            },
+            bleState = bleState.value,
+            transferPhase = _photoTransferState.value.phase,
+            sweepTarget = _sweepTarget.value,
+            isTestOnlyMode = _isTestOnlyMode.value
+        )
+        _statusToast.value = "Diagnostic AI Fix Prompt ready to copy"
+    }
+
+    fun saveUserGeminiApiKey(key: String) {
+        viewModelScope.launch {
+            prefs.saveUserGeminiApiKey(key)
+            _geminiDiagnosisResult.value = _geminiDiagnosisResult.value.copy(errorMessage = null)
+            _statusToast.value = if (key.isBlank()) "Gemini API key cleared" else "Gemini API key saved locally"
+        }
+    }
+
+    fun clearUserGeminiApiKey() {
+        saveUserGeminiApiKey("")
+        _geminiDiagnosisResult.value = GeminiDiagnosisResult()
+    }
+
+    fun askGeminiToDiagnose() {
+        val apiKey = _userGeminiApiKey.value.trim()
+        if (apiKey.isEmpty()) {
+            _geminiDiagnosisResult.value = GeminiDiagnosisResult(
+                errorMessage = "Optional: Enter your Gemini API key above to use AI diagnosis."
+            )
+            return
+        }
+        val snapshot = GeminiDiagnosticWatcher.latestSnapshot.value
+            ?: GeminiDiagnosticWatcher.captureFailureSnapshot(
+                context = app,
+                triggerReason = "Gemini API Diagnostic Requested",
+                status = WatcherHealthStatus.WATCHING,
+                bleState = bleState.value,
+                transferPhase = _photoTransferState.value.phase,
+                sweepTarget = _sweepTarget.value,
+                isTestOnlyMode = _isTestOnlyMode.value
+            )
+
+        viewModelScope.launch {
+            _geminiDiagnosisResult.value = GeminiDiagnosisResult(isAnalyzing = true)
+            val result = GeminiDiagnosticWatcher.analyzeWithUserApiKey(apiKey, snapshot)
+            result.onSuccess { diagnosis ->
+                _geminiDiagnosisResult.value = diagnosis
+            }.onFailure { err ->
+                _geminiDiagnosisResult.value = GeminiDiagnosisResult(
+                    isAnalyzing = false,
+                    errorMessage = err.localizedMessage ?: "Failed contacting Gemini API."
+                )
+            }
+        }
+    }
+
+    fun openWhatsNew() {
+        _whatsNewIsNewInstallOrUpdate.value = false
+        _showWhatsNewSheet.value = true
+    }
+
+    fun dismissWhatsNew() {
+        _showWhatsNewSheet.value = false
+        viewModelScope.launch {
+            prefs.saveLastSeenWhatsNewSignature(currentInstallSignature)
+        }
     }
 
     fun consumeStatusToast() {

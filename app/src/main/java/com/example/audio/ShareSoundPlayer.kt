@@ -37,10 +37,17 @@ class ShareSoundPlayer(private val context: Context) {
         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
         .build()
 
+    private val playerLock = Any()
     private var mediaPlayer: MediaPlayer? = null
     private var completionPlayer: MediaPlayer? = null
     private var fallbackAudioTrack: AudioTrack? = null
     private var focusRequest: AudioFocusRequest? = null
+
+    @Volatile
+    private var isSweepPlaying: Boolean = false
+
+    @Volatile
+    private var sweepDurationMs: Long = CHIME_DURATION_MS
 
     @Volatile
     private var playbackStartElapsedMs: Long = 0L
@@ -55,9 +62,12 @@ class ShareSoundPlayer(private val context: Context) {
         playbackStartElapsedMs = SystemClock.elapsedRealtime()
         requestTransientAudioFocus()
 
+        var createdPlayer: MediaPlayer? = null
         val started = runCatching {
             val afd = appContext.resources.openRawResourceFd(R.raw.namedrop_chime)
-            val player = MediaPlayer().apply {
+            val player = MediaPlayer()
+            createdPlayer = player
+            player.apply {
                 setAudioAttributes(mediaAttributes)
                 afd.use { descriptor ->
                     setDataSource(descriptor.fileDescriptor, descriptor.startOffset, descriptor.length)
@@ -65,29 +75,49 @@ class ShareSoundPlayer(private val context: Context) {
                 prepare()
                 setVolume(1.0f, 1.0f)
                 setOnCompletionListener { mp ->
-                    runCatching { mp.release() }
-                    if (mediaPlayer === mp) {
-                        mediaPlayer = null
+                    synchronized(playerLock) {
+                        if (mediaPlayer === mp) {
+                            mediaPlayer = null
+                            isSweepPlaying = false
+                        }
                     }
+                    releasePlayerSafely(mp)
                     abandonAudioFocus()
                 }
                 setOnErrorListener { mp, what, extra ->
                     DebugLogger.log("Audio", "MediaPlayer error $what/$extra — starting PCM fallback", "ERROR")
-                    runCatching { mp.release() }
-                    if (mediaPlayer === mp) mediaPlayer = null
+                    synchronized(playerLock) {
+                        if (mediaPlayer === mp) {
+                            mediaPlayer = null
+                            isSweepPlaying = false
+                        }
+                    }
+                    releasePlayerSafely(mp)
                     playFallbackPcmChime()
                     true
                 }
             }
-            mediaPlayer = player
-            playbackStartElapsedMs = SystemClock.elapsedRealtime()
-            player.start()
+            val durationMs = player.duration.toLong().takeIf { it > 0L } ?: CHIME_DURATION_MS
+            synchronized(playerLock) {
+                mediaPlayer = player
+                sweepDurationMs = durationMs
+                playbackStartElapsedMs = SystemClock.elapsedRealtime()
+                isSweepPlaying = true
+                player.start()
+            }
             DebugLogger.log(
                 "Audio",
-                "Playing Gemini+ApplePay sweep chime (${player.duration}ms, streamVol=${audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC)})"
+                "Playing Gemini+ApplePay sweep chime (${durationMs}ms, streamVol=${audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC)})"
             )
             true
         }.onFailure {
+            synchronized(playerLock) {
+                isSweepPlaying = false
+                if (mediaPlayer === createdPlayer) {
+                    mediaPlayer = null
+                }
+            }
+            releasePlayerSafely(createdPlayer)
             DebugLogger.log("Audio", "MediaPlayer failed: ${it.message} — using PCM fallback", "ERROR")
         }.getOrDefault(false)
 
@@ -97,18 +127,20 @@ class ShareSoundPlayer(private val context: Context) {
     }
 
     fun playCompletionPing() {
-        runCatching {
-            completionPlayer?.let { prev ->
-                if (prev.isPlaying) prev.stop()
-                prev.release()
-            }
+        val previous = synchronized(playerLock) {
+            val old = completionPlayer
+            completionPlayer = null
+            old
         }
-        completionPlayer = null
+        releasePlayerSafely(previous)
         requestTransientAudioFocus()
 
+        var createdPlayer: MediaPlayer? = null
         runCatching {
             val afd = appContext.resources.openRawResourceFd(R.raw.applepay_chime)
-            val player = MediaPlayer().apply {
+            val player = MediaPlayer()
+            createdPlayer = player
+            player.apply {
                 setAudioAttributes(mediaAttributes)
                 afd.use { descriptor ->
                     setDataSource(descriptor.fileDescriptor, descriptor.startOffset, descriptor.length)
@@ -116,38 +148,58 @@ class ShareSoundPlayer(private val context: Context) {
                 prepare()
                 setVolume(1.0f, 1.0f)
                 setOnCompletionListener { mp ->
-                    runCatching { mp.release() }
-                    if (completionPlayer === mp) completionPlayer = null
+                    synchronized(playerLock) {
+                        if (completionPlayer === mp) completionPlayer = null
+                    }
+                    releasePlayerSafely(mp)
                     abandonAudioFocus()
                 }
                 setOnErrorListener { mp, _, _ ->
-                    runCatching { mp.release() }
-                    if (completionPlayer === mp) completionPlayer = null
+                    synchronized(playerLock) {
+                        if (completionPlayer === mp) completionPlayer = null
+                    }
+                    releasePlayerSafely(mp)
                     abandonAudioFocus()
                     true
                 }
             }
-            completionPlayer = player
-            player.start()
+            synchronized(playerLock) {
+                completionPlayer = player
+                player.start()
+            }
         }.onFailure {
+            synchronized(playerLock) {
+                if (completionPlayer === createdPlayer) completionPlayer = null
+            }
+            releasePlayerSafely(createdPlayer)
             DebugLogger.log("Audio", "Completion ping failed: ${it.message}", "ERROR")
         }
     }
 
     /**
      * Returns the current playback position in milliseconds, using the active MediaPlayer
-     * audio clock when playing and falling back smoothly to elapsed wall-clock time.
+     * audio clock while actively playing and falling back smoothly to elapsed wall-clock time.
      */
     fun getCurrentPositionMs(): Long {
         val elapsed = (SystemClock.elapsedRealtime() - playbackStartElapsedMs).coerceAtLeast(0L)
-        val mp = mediaPlayer ?: return elapsed
+        if (!isSweepPlaying || elapsed >= sweepDurationMs - 80L) {
+            return elapsed
+        }
         return runCatching {
-            if (mp.isPlaying) {
-                mp.currentPosition.toLong().coerceAtLeast(0L)
-            } else {
-                elapsed
+            synchronized(playerLock) {
+                val mp = mediaPlayer
+                if (mp != null && isSweepPlaying) {
+                    mp.currentPosition.toLong().coerceAtLeast(0L)
+                } else {
+                    elapsed
+                }
             }
         }.getOrDefault(elapsed)
+    }
+
+    private fun releasePlayerSafely(player: MediaPlayer?) {
+        if (player == null) return
+        runCatching { player.release() }
     }
 
     private fun requestTransientAudioFocus() {
@@ -239,29 +291,25 @@ class ShareSoundPlayer(private val context: Context) {
     }
 
     fun stop() {
-        runCatching {
-            mediaPlayer?.let { mp ->
-                if (mp.isPlaying) mp.stop()
-                mp.release()
-            }
+        val (sweepMp, pingMp, track) = synchronized(playerLock) {
+            isSweepPlaying = false
+            val s = mediaPlayer
+            val p = completionPlayer
+            val t = fallbackAudioTrack
+            mediaPlayer = null
+            completionPlayer = null
+            fallbackAudioTrack = null
+            Triple(s, p, t)
         }
-        mediaPlayer = null
+        releasePlayerSafely(sweepMp)
+        releasePlayerSafely(pingMp)
 
         runCatching {
-            completionPlayer?.let { mp ->
-                if (mp.isPlaying) mp.stop()
-                mp.release()
+            track?.let {
+                if (it.playState == AudioTrack.PLAYSTATE_PLAYING) it.stop()
+                it.release()
             }
         }
-        completionPlayer = null
-
-        runCatching {
-            fallbackAudioTrack?.let { track ->
-                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) track.stop()
-                track.release()
-            }
-        }
-        fallbackAudioTrack = null
         abandonAudioFocus()
     }
 }

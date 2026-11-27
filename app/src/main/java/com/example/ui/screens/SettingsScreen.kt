@@ -22,8 +22,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BugReport
+import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Layers
+import androidx.compose.material.icons.rounded.NewReleases
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material3.FilterChip
@@ -51,10 +53,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.ai.YearlyUpdateSchedule
 import com.example.data.DebugLogger
+import com.example.model.BleProximityState
 import com.example.model.CountryProfile
+import com.example.model.DiagnosticSnapshot
+import com.example.model.GeminiDiagnosisResult
 import com.example.model.GlowPreviewMode
 import com.example.model.GlowThemeStyle
 import com.example.model.PermissionReadinessState
+import com.example.model.WatcherHealthStatus
+import com.example.model.WatcherTelemetry
+import com.example.ui.components.GeminiIntelligenceSection
 import com.example.ui.components.IosActionRow
 import com.example.ui.components.IosGroupedSection
 import com.example.ui.components.IosHairlineDivider
@@ -70,9 +78,23 @@ fun SettingsScreen(
     country: CountryProfile,
     glowPreviewMode: GlowPreviewMode,
     activeGlowTheme: GlowThemeStyle,
+    bleState: BleProximityState,
+    watcherTelemetry: WatcherTelemetry,
+    watcherHealthStatus: WatcherHealthStatus,
+    diagnosticSnapshot: DiagnosticSnapshot?,
+    userGeminiApiKey: String,
+    geminiDiagnosisResult: GeminiDiagnosisResult,
+    versionLabel: String,
     contentPadding: PaddingValues,
     onRssiThresholdChange: (Int) -> Unit,
     onGlowPreviewModeChange: (GlowPreviewMode) -> Unit,
+    onRunProximityWatchdogCheck: () -> Unit,
+    onCaptureDiagnosticSnapshot: () -> Unit,
+    onSaveUserGeminiApiKey: (String) -> Unit,
+    onClearUserGeminiApiKey: () -> Unit,
+    onAskGeminiToDiagnose: () -> Unit,
+    onOpenWhatsNew: () -> Unit,
+    onRequestContactsPermission: () -> Unit,
     onOpenPermissionsGate: () -> Unit,
     onOpenCountrySetup: () -> Unit
 ) {
@@ -160,6 +182,37 @@ fun SettingsScreen(
                     trailingStatusColor = if (country.isVerified) ios.green else ios.orange,
                     testTag = "settings_country_row",
                     onClick = onOpenCountrySetup
+                )
+                IosHairlineDivider()
+                IosActionRow(
+                    title = "Contacts Auto-Save",
+                    subtitle = if (readiness.hasContactsPermissions) {
+                        "Received & swapped cards save to Phone Book + local backup"
+                    } else {
+                        "Saving to local backup • Tap to allow Phone Book sync"
+                    },
+                    icon = Icons.Rounded.Contacts,
+                    badgeColor = ios.green,
+                    trailingText = if (readiness.hasContactsPermissions) "Synced" else "Allow",
+                    trailingStatusColor = if (readiness.hasContactsPermissions) ios.green else ios.orange,
+                    testTag = "settings_contacts_row",
+                    onClick = onRequestContactsPermission
+                )
+            }
+
+            IosGroupedSection(
+                header = "App Updates & Release Notes",
+                footer = "What's New appears automatically once after each install or app update. You can reopen it anytime here or from Updates."
+            ) {
+                IosActionRow(
+                    title = "What's New",
+                    subtitle = "$versionLabel • Installed release notes",
+                    icon = Icons.Rounded.NewReleases,
+                    badgeColor = ios.blue,
+                    trailingText = "View",
+                    trailingStatusColor = ios.blue,
+                    testTag = "settings_whats_new_row",
+                    onClick = onOpenWhatsNew
                 )
             }
 
@@ -258,6 +311,21 @@ fun SettingsScreen(
                     )
                 }
             }
+
+            GeminiIntelligenceSection(
+                readiness = readiness,
+                bleState = bleState,
+                telemetry = watcherTelemetry,
+                healthStatus = watcherHealthStatus,
+                snapshot = diagnosticSnapshot,
+                userApiKey = userGeminiApiKey,
+                diagnosisResult = geminiDiagnosisResult,
+                onRunProximityWatchdogCheck = onRunProximityWatchdogCheck,
+                onCaptureDiagnosticSnapshot = onCaptureDiagnosticSnapshot,
+                onSaveUserGeminiApiKey = onSaveUserGeminiApiKey,
+                onClearUserGeminiApiKey = onClearUserGeminiApiKey,
+                onAskGeminiToDiagnose = onAskGeminiToDiagnose
+            )
 
             IosGroupedSection(header = "Developer → Debug Log") {
                 Column(modifier = Modifier.padding(16.dp)) {

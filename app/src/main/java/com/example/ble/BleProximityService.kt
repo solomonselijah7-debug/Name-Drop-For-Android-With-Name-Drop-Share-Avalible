@@ -15,6 +15,7 @@ import androidx.core.app.ServiceCompat
 import com.example.MainActivity
 import com.example.NameDropApp
 import com.example.R
+import com.example.ai.GeminiDiagnosticWatcher
 import com.example.data.DebugLogger
 
 /**
@@ -49,6 +50,11 @@ class BleProximityService : Service() {
                 }
             }.onFailure {
                 DebugLogger.log("Service", "Failed starting BleProximityService: ${it.message}", "ERROR")
+                GeminiDiagnosticWatcher.onServiceError(
+                    context,
+                    "startForegroundService failed: ${it.message ?: "unknown"}",
+                    NameDropApp.bleManager.state.value
+                )
             }
         }
 
@@ -68,6 +74,7 @@ class BleProximityService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             NameDropApp.bleManager.stopAll()
+            GeminiDiagnosticWatcher.onServiceStopped()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -86,12 +93,23 @@ class BleProximityService : Service() {
                 0
             }
             ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, fgsType)
+            GeminiDiagnosticWatcher.onServiceStarted(lowPower)
         }.onFailure {
             DebugLogger.log("Service", "startForeground failed: ${it.message}", "ERROR")
+            GeminiDiagnosticWatcher.onServiceError(
+                this,
+                "startForeground failed: ${it.message ?: "unknown"}",
+                NameDropApp.bleManager.state.value
+            )
         }
 
         NameDropApp.bleManager.startProximity(lowPowerBackground = lowPower)
         return START_STICKY
+    }
+
+    override fun onDestroy() {
+        GeminiDiagnosticWatcher.onServiceStopped()
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

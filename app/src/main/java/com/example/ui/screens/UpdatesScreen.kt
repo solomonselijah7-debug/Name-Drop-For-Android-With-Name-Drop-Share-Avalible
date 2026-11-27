@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.NewReleases
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Sensors
 import androidx.compose.material.icons.rounded.WarningAmber
@@ -52,6 +53,7 @@ import com.example.model.DailyUpdateEntry
 import com.example.model.GlowThemeStyle
 import com.example.model.PermissionReadinessState
 import com.example.model.SelfTestReport
+import com.example.ui.components.IosActionRow
 import com.example.ui.components.IosGroupedSection
 import com.example.ui.components.IosHairlineDivider
 import com.example.ui.components.IosStatusPillBadge
@@ -67,10 +69,12 @@ fun UpdatesScreen(
     bleState: BleProximityState,
     isGeminiLoading: Boolean,
     geminiError: String?,
+    versionLabel: String,
     contentPadding: PaddingValues,
     onRunGeminiUpdateAndSelfTest: () -> Unit,
     onPreviewActiveGlow: (GlowThemeStyle) -> Unit,
     onSelectCalendarDate: (Int, Int, Int) -> Unit,
+    onOpenWhatsNew: () -> Unit,
     onOpenTestTab: () -> Unit,
     onOpenSettingsTab: () -> Unit,
     onOpenPermissionsGate: () -> Unit
@@ -114,6 +118,19 @@ fun UpdatesScreen(
                 style = MaterialTheme.typography.displayLarge,
                 color = ios.labelPrimary
             )
+
+            IosGroupedSection(header = "Installed App Release") {
+                IosActionRow(
+                    title = "What's New in This Update",
+                    subtitle = "$versionLabel • View changelog anytime",
+                    icon = Icons.Rounded.NewReleases,
+                    badgeColor = ios.blue,
+                    trailingText = "Open",
+                    trailingStatusColor = ios.blue,
+                    testTag = "updates_whats_new_row",
+                    onClick = onOpenWhatsNew
+                )
+            }
 
             // Active Local-Date & Daily Edition Card
             Surface(

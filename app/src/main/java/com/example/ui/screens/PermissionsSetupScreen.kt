@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.BatterySaver
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.BluetoothSearching
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Contacts
 import androidx.compose.material.icons.rounded.GpsFixed
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.LocationOn
@@ -138,6 +139,13 @@ fun PermissionsSetupScreen(
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         DebugLogger.log("Perms", "Notification permission granted=$granted")
+        onRefreshReadiness()
+    }
+
+    val contactsPermsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        DebugLogger.log("Perms", "Contacts auto-save permission result: $results")
         onRefreshReadiness()
     }
 
@@ -445,6 +453,25 @@ fun PermissionsSetupScreen(
                             }
                         )
                     }
+
+                    IosHairlineDivider()
+                    IosActionRow(
+                        title = "Contacts Auto-Save",
+                        subtitle = if (readiness.hasContactsPermissions) {
+                            "Automatically saves received & swapped numbers to your Phone Book"
+                        } else {
+                            "Recommended — saves shared phone numbers directly to Contacts"
+                        },
+                        icon = Icons.Rounded.Contacts,
+                        badgeColor = ios.green,
+                        trailingText = if (readiness.hasContactsPermissions) "Allowed" else "Allow",
+                        trailingStatusColor = if (readiness.hasContactsPermissions) ios.green else ios.orange,
+                        showChevron = !readiness.hasContactsPermissions,
+                        testTag = "perm_contacts_autosave",
+                        onClick = {
+                            contactsPermsLauncher.launch(BlePermissions.requiredContactsPermissions())
+                        }
+                    )
                 }
 
                 // Huawei / EMUI warning card if detected

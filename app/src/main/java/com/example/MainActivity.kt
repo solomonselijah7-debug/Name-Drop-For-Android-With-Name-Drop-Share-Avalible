@@ -6,8 +6,10 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -27,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BluetoothSearching
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Send
 import androidx.compose.material3.Button
@@ -37,10 +40,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -57,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.example.ai.configureAppCheck
+import com.example.ble.BlePermissions
 import com.example.ble.IncomingAlertManager
 import com.example.data.MediaStorageHelper
 import com.example.model.GlowThemeStyle
@@ -68,6 +74,7 @@ import com.example.ui.components.FloatingPillNavBar
 import com.example.ui.components.FullScreenNameDropOverlay
 import com.example.ui.components.MutualCardSwapOverlay
 import com.example.ui.components.PerimeterSweepOverlay
+import com.example.ui.components.WhatsNewModalSheet
 import com.example.ui.screens.Android8UnsupportedScreen
 import com.example.ui.screens.ContactCustomizerSheet
 import com.example.ui.screens.CountryVerifySetupSheet
@@ -79,6 +86,7 @@ import com.example.ui.screens.TestScreen
 import com.example.ui.screens.TutorialScreen
 import com.example.ui.screens.UpdatesScreen
 import com.example.ui.theme.IosBlue
+import com.example.ui.theme.IosGreen
 import com.example.ui.theme.LocalIosColors
 import com.example.ui.theme.NameDropTheme
 
@@ -132,7 +140,21 @@ class MainActivity : ComponentActivity() {
                 val selfTest by viewModel.selfTestReport.collectAsStateWithLifecycle()
                 val geminiLoading by viewModel.geminiLoading.collectAsStateWithLifecycle()
                 val geminiError by viewModel.geminiError.collectAsStateWithLifecycle()
+                val watcherTelemetry by viewModel.watcherTelemetry.collectAsStateWithLifecycle()
+                val watcherHealthStatus by viewModel.watcherHealthStatus.collectAsStateWithLifecycle()
+                val diagnosticSnapshot by viewModel.diagnosticSnapshot.collectAsStateWithLifecycle()
+                val userGeminiApiKey by viewModel.userGeminiApiKey.collectAsStateWithLifecycle()
+                val geminiDiagnosisResult by viewModel.geminiDiagnosisResult.collectAsStateWithLifecycle()
+                val savedContacts by viewModel.savedContacts.collectAsStateWithLifecycle()
+                val showWhatsNewSheet by viewModel.showWhatsNewSheet.collectAsStateWithLifecycle()
+                val whatsNewIsNewInstall by viewModel.whatsNewIsNewInstallOrUpdate.collectAsStateWithLifecycle()
                 val statusToast by viewModel.statusToast.collectAsStateWithLifecycle()
+
+                val contactsPermLauncher = rememberLauncherForActivityResult(
+                    contract = ActivityResultContracts.RequestMultiplePermissions()
+                ) {
+                    viewModel.refreshReadiness()
+                }
 
                 val effectiveGlow = previewGlowOverride ?: activeGlowTheme
 
@@ -189,6 +211,7 @@ class MainActivity : ComponentActivity() {
                                             readiness = readiness,
                                             bleState = bleState,
                                             myCard = myCard,
+                                            savedContacts = savedContacts,
                                             activeGlowTheme = activeGlowTheme,
                                             contentPadding = innerPadding,
                                             onToggleNameDrop = viewModel::toggleNameDrop,
@@ -196,12 +219,16 @@ class MainActivity : ComponentActivity() {
                                             onRestartBluetoothScan = viewModel::restartBluetoothScan,
                                             onOpenBluetoothSettings = {
                                                 runCatching {
-                                                    startActivity(com.example.ble.BlePermissions.createBluetoothSettingsIntent())
+                                                    startActivity(BlePermissions.createBluetoothSettingsIntent())
                                                 }
                                             },
                                             onCustomizeCard = viewModel::openContactCustomizer,
                                             onQuickTestSweep = {
                                                 viewModel.triggerPerimeterSweep(SweepTarget.CONTACT_CARD_EXCHANGE)
+                                            },
+                                            onSyncSavedContact = viewModel::syncSavedContactToSystem,
+                                            onRequestContactsPermission = {
+                                                contactsPermLauncher.launch(BlePermissions.requiredContactsPermissions())
                                             }
                                         )
                                     }
@@ -213,7 +240,8 @@ class MainActivity : ComponentActivity() {
                                             selectedPhotoUri = selectedPhotoUri,
                                             transferState = transferState,
                                             contentPadding = innerPadding,
-                                            onToggleShare = viewModel::toggleShareMode,
+                                            onToggleShare = { enabled -> viewModel.toggleShareMode(enabled) },
+                                            onEnableShareQuietly = { viewModel.toggleShareMode(enabled = true, playSweep = false) },
                                             onStartReceiveListening = viewModel::startReceiveListening,
                                             onStopReceiveListening = viewModel::stopReceiveListening,
                                             onSelectPhoto = viewModel::selectPhotoToShare,
@@ -254,10 +282,12 @@ class MainActivity : ComponentActivity() {
                                             bleState = bleState,
                                             isGeminiLoading = geminiLoading,
                                             geminiError = geminiError,
+                                            versionLabel = viewModel.currentInstallVersionLabel,
                                             contentPadding = innerPadding,
                                             onRunGeminiUpdateAndSelfTest = viewModel::runGeminiDailyRefreshAndSelfTest,
                                             onPreviewActiveGlow = viewModel::previewGlowTheme,
                                             onSelectCalendarDate = viewModel::jumpToCalendarEntry,
+                                            onOpenWhatsNew = viewModel::openWhatsNew,
                                             onOpenTestTab = { viewModel.selectTab(NavTab.TEST) },
                                             onOpenSettingsTab = { viewModel.selectTab(NavTab.SETTINGS) },
                                             onOpenPermissionsGate = viewModel::openPermissionsGateFromSettings
@@ -271,9 +301,25 @@ class MainActivity : ComponentActivity() {
                                             country = country,
                                             glowPreviewMode = glowPreviewMode,
                                             activeGlowTheme = activeGlowTheme,
+                                            bleState = bleState,
+                                            watcherTelemetry = watcherTelemetry,
+                                            watcherHealthStatus = watcherHealthStatus,
+                                            diagnosticSnapshot = diagnosticSnapshot,
+                                            userGeminiApiKey = userGeminiApiKey,
+                                            geminiDiagnosisResult = geminiDiagnosisResult,
+                                            versionLabel = viewModel.currentInstallVersionLabel,
                                             contentPadding = innerPadding,
                                             onRssiThresholdChange = viewModel::updateRssiThreshold,
                                             onGlowPreviewModeChange = viewModel::setGlowPreviewMode,
+                                            onRunProximityWatchdogCheck = viewModel::runProximityWatchdogCheck,
+                                            onCaptureDiagnosticSnapshot = viewModel::captureDiagnosticSnapshotNow,
+                                            onSaveUserGeminiApiKey = viewModel::saveUserGeminiApiKey,
+                                            onClearUserGeminiApiKey = viewModel::clearUserGeminiApiKey,
+                                            onAskGeminiToDiagnose = viewModel::askGeminiToDiagnose,
+                                            onOpenWhatsNew = viewModel::openWhatsNew,
+                                            onRequestContactsPermission = {
+                                                contactsPermLauncher.launch(BlePermissions.requiredContactsPermissions())
+                                            },
                                             onOpenPermissionsGate = viewModel::openPermissionsGateFromSettings,
                                             onOpenCountrySetup = viewModel::openCountryContactSetupFromSettings
                                         )
@@ -311,13 +357,19 @@ class MainActivity : ComponentActivity() {
                                     viewModel.shareMyContactNow()
                                 },
                                 onSaveContact = {
-                                    runCatching {
-                                        startActivity(MediaStorageHelper.buildSaveContactIntent(offer.contact))
+                                    viewModel.saveIncomingContactToBook {
+                                        runCatching {
+                                            startActivity(MediaStorageHelper.buildSaveContactIntent(offer.contact))
+                                        }
                                     }
                                 },
                                 onDone = viewModel::dismissIncomingContact
                             )
                         }
+                    }
+
+                    // Keep Incoming Media & External Share sheets outside sweep gate so they stay anchored
+                    if (!cardSwapState.isSwapping) {
 
                         // Incoming Photo / Video Accept / Decline Bottom Sheet
                         incomingPhoto?.let { offer ->
@@ -439,10 +491,21 @@ class MainActivity : ComponentActivity() {
                             }
                         }
 
-                        // Compact "Hold this phone against another phone" Share Sheet Prompt (from Gallery/Apps)
+                        // Compact "Hold this phone against another phone" Share Sheet Prompt (anchored throughout session)
                         externalShareSession?.let { session ->
+                            val extSheetState = rememberModalBottomSheetState(
+                                skipPartiallyExpanded = true,
+                                confirmValueChange = { target ->
+                                    target != SheetValue.Hidden || (!session.isSharing && !session.isArmed)
+                                }
+                            )
                             ModalBottomSheet(
-                                onDismissRequest = viewModel::cancelExternalShareSession,
+                                onDismissRequest = {
+                                    if (!session.isSharing && !session.isArmed) {
+                                        viewModel.cancelExternalShareSession()
+                                    }
+                                },
+                                sheetState = extSheetState,
                                 containerColor = Color.White,
                                 shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
                             ) {
@@ -459,9 +522,13 @@ class MainActivity : ComponentActivity() {
                                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Rounded.BluetoothSearching,
+                                            imageVector = if (session.isSharedComplete) {
+                                                Icons.Rounded.CheckCircle
+                                            } else {
+                                                Icons.Rounded.BluetoothSearching
+                                            },
                                             contentDescription = null,
-                                            tint = IosBlue,
+                                            tint = if (session.isSharedComplete) IosGreen else IosBlue,
                                             modifier = Modifier.size(28.dp)
                                         )
                                         Text(
@@ -475,7 +542,11 @@ class MainActivity : ComponentActivity() {
                                     Text(
                                         text = session.statusMessage,
                                         style = MaterialTheme.typography.titleMedium,
-                                        color = Color(0xFF1C1C1E)
+                                        color = when {
+                                            session.isSharedComplete -> IosGreen
+                                            session.isSharing -> IosBlue
+                                            else -> Color(0xFF1C1C1E)
+                                        }
                                     )
 
                                     session.uris.firstOrNull()?.let { previewUri ->
@@ -522,18 +593,38 @@ class MainActivity : ComponentActivity() {
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.Center
                                     ) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(18.dp),
-                                            color = IosBlue,
-                                            strokeWidth = 2.5.dp
-                                        )
+                                        if (session.isSharedComplete) {
+                                            Icon(
+                                                imageVector = Icons.Rounded.CheckCircle,
+                                                contentDescription = "Shared",
+                                                tint = IosGreen,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                        } else if (session.isSharing) {
+                                            CircularProgressIndicator(
+                                                progress = { session.progress.coerceIn(0.12f, 0.96f) },
+                                                modifier = Modifier.size(18.dp),
+                                                color = IosBlue,
+                                                strokeWidth = 2.5.dp
+                                            )
+                                        } else {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(18.dp),
+                                                color = IosBlue,
+                                                strokeWidth = 2.5.dp
+                                            )
+                                        }
                                         Spacer(modifier = Modifier.size(10.dp))
                                         Text(
-                                            text = bleState.nearestDeviceName?.let {
-                                                "Nearby: $it (${bleState.smoothedRssi ?: bleState.nearestRssi ?: "--"} dBm)"
-                                            } ?: "Scanning via Bluetooth proximity...",
+                                            text = when {
+                                                session.isSharedComplete -> "Shared successfully"
+                                                session.isSharing -> "Sharing (${(session.progress * 100).toInt()}%)..."
+                                                else -> bleState.nearestDeviceName?.let {
+                                                    "Nearby: $it (${bleState.smoothedRssi ?: bleState.nearestRssi ?: "--"} dBm)"
+                                                } ?: "Scanning via Bluetooth proximity..."
+                                            },
                                             style = MaterialTheme.typography.bodyMedium,
-                                            color = Color(0xFF6C6C70)
+                                            color = if (session.isSharedComplete) IosGreen else Color(0xFF6C6C70)
                                         )
                                     }
 
@@ -557,23 +648,36 @@ class MainActivity : ComponentActivity() {
                                         }
                                         Button(
                                             onClick = viewModel::triggerExternalShareNow,
+                                            enabled = !session.isSharing && !session.isSharedComplete,
                                             modifier = Modifier
                                                 .weight(1f)
                                                 .heightIn(min = 50.dp)
                                                 .testTag("external_share_send_now_button"),
                                             shape = CircleShape,
                                             colors = ButtonDefaults.buttonColors(
-                                                containerColor = IosBlue,
+                                                containerColor = if (session.isSharedComplete) IosGreen else IosBlue,
                                                 contentColor = Color.White
                                             )
                                         ) {
                                             Icon(
-                                                imageVector = Icons.Rounded.Send,
+                                                imageVector = if (session.isSharedComplete) {
+                                                    Icons.Rounded.CheckCircle
+                                                } else {
+                                                    Icons.Rounded.Send
+                                                },
                                                 contentDescription = null,
                                                 modifier = Modifier.size(18.dp)
                                             )
                                             Spacer(modifier = Modifier.size(6.dp))
-                                            Text("Share Now", fontWeight = FontWeight.SemiBold)
+                                            Text(
+                                                text = when {
+                                                    session.isSharedComplete -> "Shared ✓"
+                                                    session.isSharing -> "Sharing..."
+                                                    session.isArmed -> "Hold Phones Close..."
+                                                    else -> "Share"
+                                                },
+                                                fontWeight = FontWeight.SemiBold
+                                            )
                                         }
                                     }
                                     Spacer(modifier = Modifier.height(8.dp))
@@ -602,6 +706,15 @@ class MainActivity : ComponentActivity() {
 
                     // Top-Center Animated Drop Pop-Down ("Sharing" ring progress -> green "Shared")
                     DropTransferBadgeOverlay(state = dropBadgeState)
+
+                    // What's New Sheet (shown once per install/update, or reopened from Settings/Updates)
+                    if (showWhatsNewSheet && !showBluetoothPrompt) {
+                        WhatsNewModalSheet(
+                            versionLabel = viewModel.currentInstallVersionLabel,
+                            isNewInstallOrUpdate = whatsNewIsNewInstall,
+                            onDismiss = viewModel::dismissWhatsNew
+                        )
+                    }
                 }
             }
         }
@@ -617,12 +730,12 @@ class MainActivity : ComponentActivity() {
         if (intent == null) return
         when (intent.action) {
             Intent.ACTION_SEND -> {
-                val uri: Uri? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val uri: Uri? = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
                 } else {
                     @Suppress("DEPRECATION")
                     intent.getParcelableExtra(Intent.EXTRA_STREAM)
-                }
+                }) ?: intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri ?: intent.data
                 if (uri != null) {
                     viewModel.handleExternalShareIntent(
                         uris = listOf(uri),
@@ -633,15 +746,22 @@ class MainActivity : ComponentActivity() {
             }
 
             Intent.ACTION_SEND_MULTIPLE -> {
-                val uris: ArrayList<Uri>? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                val collected = LinkedHashSet<Uri>()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
                 } else {
                     @Suppress("DEPRECATION")
-                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                    intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+                }?.forEach { collected.add(it) }
+                intent.clipData?.let { cd ->
+                    for (idx in 0 until cd.itemCount) {
+                        cd.getItemAt(idx)?.uri?.let { collected.add(it) }
+                    }
                 }
-                if (!uris.isNullOrEmpty()) {
+                intent.data?.let { collected.add(it) }
+                if (collected.isNotEmpty()) {
                     viewModel.handleExternalShareIntent(
-                        uris = uris,
+                        uris = collected.toList(),
                         mimeTypes = listOfNotNull(intent.type),
                         isMultiple = true
                     )

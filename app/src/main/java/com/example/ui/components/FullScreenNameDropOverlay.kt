@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.rounded.BookmarkAdd
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Person
@@ -92,8 +93,8 @@ fun FullScreenNameDropOverlay(
 ) {
     BackHandler { onDone() }
 
-    val popAnim = remember(offer) { Animatable(0f) }
-    LaunchedEffect(offer) {
+    val popAnim = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
         popAnim.animateTo(
             targetValue = 1f,
             animationSpec = spring(
@@ -301,6 +302,38 @@ fun FullScreenNameDropOverlay(
                 }
             }
 
+            if (offer.isAutoSavedToContacts) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Surface(
+                    shape = CircleShape,
+                    color = Color(0xFF34C759).copy(alpha = 0.24f),
+                    modifier = Modifier.testTag("contact_saved_badge")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.CheckCircle,
+                            contentDescription = "Contact saved",
+                            tint = Color(0xFF4ADE80),
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Text(
+                            text = if (offer.savedToSystemContacts) {
+                                "Contact saved"
+                            } else {
+                                "Contact saved locally"
+                            },
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.weight(0.55f))
 
             // Large iOS NameDrop Portrait
@@ -433,12 +466,20 @@ fun FullScreenNameDropOverlay(
                         )
                     ) {
                         Icon(
-                            imageVector = Icons.Rounded.BookmarkAdd,
+                            imageVector = if (offer.savedToSystemContacts) Icons.Rounded.CheckCircle else Icons.Rounded.BookmarkAdd,
                             contentDescription = null,
+                            tint = if (offer.savedToSystemContacts) Color(0xFF16A34A) else Color.Black,
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Save Contact", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            text = when {
+                                offer.savedToSystemContacts -> "Saved"
+                                offer.isAutoSavedToContacts -> "Sync Contacts"
+                                else -> "Save Contact"
+                            },
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
 
                     Button(

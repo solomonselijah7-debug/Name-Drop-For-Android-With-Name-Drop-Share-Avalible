@@ -55,6 +55,8 @@ class AppPreferencesRepository(private val context: Context) {
         val LAST_UPDATE_EDITION_KEY = stringPreferencesKey("last_update_edition_key")
         val CACHED_GEMINI_TIP = stringPreferencesKey("cached_gemini_tip")
         val LAST_SELF_TEST_DATE = stringPreferencesKey("last_self_test_date")
+        val USER_GEMINI_API_KEY = stringPreferencesKey("user_gemini_api_key")
+        val LAST_SEEN_WHATS_NEW_SIGNATURE = stringPreferencesKey("last_seen_whats_new_signature")
     }
 
     val onboardingCompleted: Flow<Boolean> = context.dataStore.data.map {
@@ -125,6 +127,14 @@ class AppPreferencesRepository(private val context: Context) {
 
     val cachedUpdateMeta: Flow<Pair<String, String>> = context.dataStore.data.map { prefs ->
         (prefs[Keys.LAST_UPDATE_EDITION_KEY] ?: "") to (prefs[Keys.CACHED_GEMINI_TIP] ?: "")
+    }
+
+    val userGeminiApiKey: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[Keys.USER_GEMINI_API_KEY] ?: ""
+    }
+
+    val lastSeenWhatsNewSignature: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[Keys.LAST_SEEN_WHATS_NEW_SIGNATURE] ?: ""
     }
 
     suspend fun setOnboardingCompleted(done: Boolean) {
@@ -209,5 +219,22 @@ class AppPreferencesRepository(private val context: Context) {
 
     suspend fun saveSelfTestDate(dateKey: String) {
         context.dataStore.edit { it[Keys.LAST_SELF_TEST_DATE] = dateKey }
+    }
+
+    suspend fun saveUserGeminiApiKey(apiKey: String) {
+        val cleaned = apiKey.trim()
+        context.dataStore.edit { prefs ->
+            if (cleaned.isEmpty()) {
+                prefs.remove(Keys.USER_GEMINI_API_KEY)
+            } else {
+                prefs[Keys.USER_GEMINI_API_KEY] = cleaned
+            }
+        }
+    }
+
+    suspend fun saveLastSeenWhatsNewSignature(signature: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.LAST_SEEN_WHATS_NEW_SIGNATURE] = signature
+        }
     }
 }

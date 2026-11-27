@@ -76,6 +76,7 @@ data class PermissionReadinessState(
     val hasNotificationPermission: Boolean = false,
     val isIgnoringBatteryOptimizations: Boolean = false,
     val canDrawOverlays: Boolean = false,
+    val hasContactsPermissions: Boolean = false,
     val isHuaweiDevice: Boolean = false,
     val deviceModelLabel: String = ""
 ) {
@@ -113,6 +114,7 @@ data class BleProximityState(
     val isScanning: Boolean = false,
     val isAdvertising: Boolean = false,
     val nearestDeviceName: String? = null,
+    val nearestDeviceAddress: String? = null,
     val nearestRssi: Int? = null,
     val smoothedRssi: Int? = null,
     val rssiThreshold: Int = -48,
@@ -122,6 +124,7 @@ data class BleProximityState(
     val pairedDeviceNames: List<String> = emptyList(),
     val nearbySignalCount: Int = 0,
     val matchedPeerIsNameDropApp: Boolean = false,
+    val isMatchedPeerReady: Boolean = false,
     val lastScanError: String? = null
 )
 
@@ -135,7 +138,20 @@ data class IncomingContactOffer(
     val backgroundPhotoBytes: ByteArray? = null,
     val isTestSimulation: Boolean = false,
     val isReceiveOnlyMode: Boolean = false,
-    val isSwappedExchange: Boolean = false
+    val isSwappedExchange: Boolean = false,
+    val isAutoSavedToContacts: Boolean = false,
+    val savedToSystemContacts: Boolean = false,
+    val autoSaveStatusText: String? = null
+)
+
+@Immutable
+data class SavedContactEntry(
+    val id: String,
+    val card: ContactCard,
+    val savedAtMillis: Long,
+    val savedToSystemContacts: Boolean,
+    val systemContactUri: String? = null,
+    val sourceLabel: String = "Received"
 )
 
 @Immutable
@@ -149,6 +165,8 @@ data class IncomingPhotoOffer(
     val isGroupShare: Boolean = false,
     val previewUri: Uri? = null,
     val photoBytes: ByteArray? = null,
+    val peerAddress: String? = null,
+    val awaitingTransfer: Boolean = false,
     val isTestSimulation: Boolean = false
 )
 
@@ -198,6 +216,14 @@ data class ExternalShareSession(
     val mimeTypes: List<String> = emptyList(),
     val isVideo: Boolean = false,
     val isMultiple: Boolean = false,
+    val isArmed: Boolean = false,
+    val isAwaitingAcceptance: Boolean = false,
+    val isSharing: Boolean = false,
+    val progress: Float = 0f,
+    val isSharedComplete: Boolean = false,
+    val targetDeviceName: String? = null,
+    val targetDeviceAddress: String? = null,
+    val targetRssi: Int? = null,
     val statusMessage: String = "Hold this phone against another phone"
 ) {
     val isActive: Boolean
@@ -268,3 +294,51 @@ data class DebugLogEntry(
     val level: String,
     val message: String
 )
+
+enum class WatcherHealthStatus(val label: String) {
+    WATCHING("Watching"),
+    HEALTHY("Healthy"),
+    STALL_DETECTED("Proximity Stall"),
+    ISSUE_DETECTED("Issue Detected")
+}
+
+@Immutable
+data class WatcherTelemetry(
+    val foregroundServiceRunning: Boolean = false,
+    val fgsLowPowerMode: Boolean? = null,
+    val fgsLastError: String? = null,
+    val scanCallbackCount: Long = 0L,
+    val lastScanResultAtMs: Long = 0L,
+    val lastScanFailedCode: Int? = null,
+    val lastScanError: String? = null,
+    val lastProximityMatchAtMs: Long = 0L,
+    val lastOverlayLaunchAtMs: Long = 0L,
+    val lastOverlayError: String? = null,
+    val lastOverlayResult: String? = null,
+    val lastHandshakeStartedAtMs: Long = 0L,
+    val lastHandshakeCompletedAtMs: Long = 0L,
+    val lastTransferError: String? = null,
+    val isCardLockActive: Boolean = false,
+    val watchdogRemainingSec: Int? = null
+)
+
+@Immutable
+data class DiagnosticSnapshot(
+    val capturedAt: String,
+    val triggerReason: String,
+    val healthStatus: WatcherHealthStatus,
+    val summaryHeadline: String,
+    val suspectedRootCauses: List<String>,
+    val aiFixPrompt: String,
+    val sanitizedLogExcerpt: String
+)
+
+@Immutable
+data class GeminiDiagnosisResult(
+    val isAnalyzing: Boolean = false,
+    val plainLanguageDiagnosis: String = "",
+    val updatedFixPrompt: String = "",
+    val errorMessage: String? = null,
+    val analyzedAt: String = ""
+)
+
